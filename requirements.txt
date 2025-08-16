@@ -1,0 +1,5 @@
+#cupy-cuda{version}x #ex cupy-cuda12x
+
+
+
+pip install kvikio-cu12 
