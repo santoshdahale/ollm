@@ -1,4 +1,16 @@
+import codecs, io
 import torch 
+
+def file_put_contents(filename, st):
+    file = codecs.open(filename, "w", "utf-8")
+    file.write(st)
+    file.close()
+
+def file_get_contents(name):
+    f = io.open(name, mode="r", encoding="utf-8") #utf-8 | Windows-1252
+    return f.read()
+    
+
 # === Helper utilities ===
 def _walk_to_parent(obj, attr_path):
     """Return (parent_obj, leaf_name) for attr_path like 'self_attn.q_proj.weight'"""
@@ -43,3 +55,17 @@ def _set_meta_placeholder(target_parent, leaf):
     """Replace parameter/module attribute with a tiny meta-device Parameter to free VRAM."""
     placeholder = torch.nn.Parameter(torch.empty(0, device="meta"), requires_grad=False)
     setattr(target_parent, leaf, placeholder)
+
+
+def remove_layers_weights(model):
+    # 2. Remove heavy decoder block weights (keep skeleton)
+    for layer in model.model.layers:
+        for name, module in layer.named_children():
+            if hasattr(module, "weight"):
+                module.weight = torch.nn.Parameter(
+                    torch.empty(0), requires_grad=False
+                )                
+            if hasattr(module, "bias") and module.bias is not None:
+                module.bias = torch.nn.Parameter(
+                    torch.empty(0), requires_grad=False
+                )    

@@ -20,8 +20,7 @@ state_dict = AutoModelForCausalLM.from_pretrained(
 manifest = {}
 for name, tensor in state_dict.items():
     # Only export layer weights to keep it small; adjust filter as needed
-    if not name.startswith(("model.layers", "transformer.h")):
-        continue
+    #if not name.startswith(("model.layers", "transformer.h")): continue
 
     t = tensor.to("cpu").contiguous()  # ensure contiguous for .tofile
     path = os.path.join(OUT_DIR, f"{name.replace('.', '__')}.bin")

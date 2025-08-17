@@ -6,7 +6,7 @@ from torch import nn
 from typing import Callable, Optional, Tuple, Union
 from transformers import AutoTokenizer, LlamaModel, LlamaForCausalLM
 
-from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
+from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents
 from gds_loader import GDSWeights
 from attention import online_chunked_grouped_attention_rope as chunked_attention
 
@@ -101,7 +101,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 				# 1) load tensor from loader
 				#tensor = loader.load_tensor(manifest_name)  # MUST return a torch.Tensor ideally on CUDA
 				tensor = loader.load_param_to_cuda(manifest_name)
-				
+
 				# 2) assign into local module
 				parent, leaf = _walk_to_parent(self, attr_path)
 				_assign_tensor_to_module(parent, leaf, tensor)
@@ -139,11 +139,21 @@ llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
 class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
-		
+	
+	def load_weights(self): #emptying layers weights for now
+		manifest_map = loader.manifest
+		for name, v in manifest_map.items():
+			if name.startswith("model.layers."):# continue
+				tensor = torch.tensor(0, device=device)  #loader.load_param_to_cuda(name) #temp
+				parent, leaf = _walk_to_parent(self, name)
+				_assign_tensor_to_module(parent, leaf, tensor)
+				#print("setting 0:", name)
+		#if torch.cuda.is_available(): torch.cuda.synchronize()
 
 def inference_chat():
-	messages = [{"role":"user", "content":"You are helpful AI assistant"}]
-	messages = [{"role":"system", "content":"List planets"}] + messages
+	gp = file_get_contents("./temp/landing_gprompt.txt")# "You are helpful AI assistant" #
+	um = "List planets"
+	messages = [{"role":"system", "content":gp }, {"role":"user", "content":um}]	
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, truncation=True, max_length=4000, return_tensors="pt").to(device)
 	outputs = model.generate(**inputs, max_new_tokens=20, do_sample=False).detach().cpu()
@@ -152,15 +162,17 @@ def inference_chat():
 
 
 #==============================================================================================
-if __name__ == "__main__":
+if __name__ == "__main__":	
+	loader = GDSWeights("./gds_export/manifest.json")
 	device = torch.device("cuda")	
 	model_id = "meta-llama/Llama-3.2-1B-Instruct" #Qwen/Qwen2-0.5B | Qwen/Qwen2-0.5B-Instruct | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "meta-llama/Llama-3.2-1B-Instruct" | "meta-llama/Llama-3.2-1B"
 	tokenizer = AutoTokenizer.from_pretrained(model_id)
 	tokenizer.pad_token = tokenizer.eos_token
-	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)	
+	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu") #cpu | meta
 	#print(model, "\n\n", model.dtype)
 	model.eval()
-	model.cuda() #temp
-	loader = GDSWeights("./gds_export/manifest.json")	
+	model.load_weights() #ideally we need to load weights upen their need
+	#remove_layers_weights(model) #not decreasing anything
+	model.cuda()
+	#print("model -> cuda"); time.sleep(20)	
 	inference_chat()
-
