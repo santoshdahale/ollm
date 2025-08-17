@@ -5,12 +5,13 @@ import torch
 from torch import nn
 from typing import Callable, Optional, Tuple, Union
 from transformers import AutoTokenizer, LlamaModel, LlamaForCausalLM
-from attention import online_chunked_grouped_attention_rope as chunked_attention
+
+from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
 from gds_loader import GDSWeights
+from attention import online_chunked_grouped_attention_rope as chunked_attention
 
 #======== rewriting core classes tested on transformers==4.52.3 ============== 
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaDecoderLayer, LlamaConfig
-
 
 class MyLlamaAttention(LlamaAttention):
 	def forward(
@@ -64,53 +65,6 @@ class MyLlamaAttention(LlamaAttention):
 
 
 
-# === Helper utilities ===
-def _walk_to_parent(obj, attr_path):
-    """Return (parent_obj, leaf_name) for attr_path like 'self_attn.q_proj.weight'"""
-    parts = attr_path.split('.')
-    parent = obj
-    for p in parts[:-1]:
-        parent = getattr(parent, p)
-    return parent, parts[-1]
-
-def _assign_tensor_to_module(target_parent, leaf, tensor):
-    """
-    Assign a tensor into target_parent.<leaf>.
-    - If target_parent.<leaf> has a .load call, call it with tensor.
-    - Else, if attribute endswith 'weight' or 'bias' and current attr is nn.Parameter, replace it.
-    - Else, set attribute to nn.Parameter(tensor) (read-only).
-    """
-    existing = getattr(target_parent, leaf, None)
-
-    # If target object has a load(tensor) method (user's custom modules), call it.
-    if hasattr(existing, "load") and callable(getattr(existing, "load")):
-        existing.load(tensor)   # user-supplied API
-        return
-
-    # If existing is a Parameter (typical), replace with new Parameter on CUDA
-    if isinstance(existing, torch.nn.Parameter) or getattr(existing, "__class__", None) is torch.nn.Parameter:
-        param = torch.nn.Parameter(tensor.detach(), requires_grad=False)
-        setattr(target_parent, leaf, param)
-        return
-
-    # If attribute is a module (like a Linear) we attempt to set its weight/bias
-    if isinstance(existing, nn.Linear) or hasattr(existing, "weight"):
-        # try to set weight and bias if given tensor is 2D weight
-        if tensor.ndim == 2 and hasattr(existing, "weight"):
-            existing.weight = torch.nn.Parameter(tensor.detach(), requires_grad=False)
-            return
-        # fallback: set attribute to Parameter
-    # Default fallback: replace attribute with a Parameter
-    setattr(target_parent, leaf, torch.nn.Parameter(tensor.detach(), requires_grad=False))
-
-
-def _set_meta_placeholder(target_parent, leaf):
-    """Replace parameter/module attribute with a tiny meta-device Parameter to free VRAM."""
-    placeholder = torch.nn.Parameter(torch.empty(0, device="meta"), requires_grad=False)
-    setattr(target_parent, leaf, placeholder)
-
-
-
 class MyLlamaDecoderLayer(LlamaDecoderLayer):
 	def __init__(self, config: LlamaConfig, layer_idx: int):
 		self.layer_idx = layer_idx
@@ -147,8 +101,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 				# 1) load tensor from loader
 				#tensor = loader.load_tensor(manifest_name)  # MUST return a torch.Tensor ideally on CUDA
 				tensor = loader.load_param_to_cuda(manifest_name)
-				#if not tensor.is_cuda: tensor = tensor.to(device=device, non_blocking=True)
-
+				
 				# 2) assign into local module
 				parent, leaf = _walk_to_parent(self, attr_path)
 				_assign_tensor_to_module(parent, leaf, tensor)
@@ -204,11 +157,10 @@ if __name__ == "__main__":
 	model_id = "meta-llama/Llama-3.2-1B-Instruct" #Qwen/Qwen2-0.5B | Qwen/Qwen2-0.5B-Instruct | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "meta-llama/Llama-3.2-1B-Instruct" | "meta-llama/Llama-3.2-1B"
 	tokenizer = AutoTokenizer.from_pretrained(model_id)
 	tokenizer.pad_token = tokenizer.eos_token
-	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)
-	#model.config.attention_chunk_size = 4096 #??
+	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)	
 	#print(model, "\n\n", model.dtype)
 	model.eval()
 	model.cuda() #temp
-	loader = GDSWeights("./gds_export/manifest.json")
+	loader = GDSWeights("./gds_export/manifest.json")	
 	inference_chat()
 
