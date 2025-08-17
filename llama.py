@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, LlamaModel, LlamaForCausalLM
 
 from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents
 from gds_loader import GDSWeights
-from attention import online_chunked_grouped_attention_rope as chunked_attention
+from attention import online_chunked_grouped_attention_rope_no_mask as chunked_attention
 
 #======== rewriting core classes tested on transformers==4.52.3 ============== 
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaDecoderLayer, LlamaConfig
@@ -40,7 +40,8 @@ class MyLlamaAttention(LlamaAttention):
 			key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
 		#===
-		attn_output1 = chunked_attention(query_states, key_states, value_states).transpose(1, 2) #transpose?
+
+		attn_output1 = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"]).transpose(1, 2) #transpose?
 		attn_weights = None
 		"""
 		attention_interface: Callable = eager_attention_forward
@@ -151,18 +152,18 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 		#if torch.cuda.is_available(): torch.cuda.synchronize()
 
 def inference_chat():
-	gp = file_get_contents("./temp/landing_gprompt.txt")# "You are helpful AI assistant" #
-	um = "List planets"
-	messages = [{"role":"system", "content":gp }, {"role":"user", "content":um}]	
+	#sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
+	sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
+	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, truncation=True, max_length=4000, return_tensors="pt").to(device)
-	outputs = model.generate(**inputs, max_new_tokens=20, do_sample=False).detach().cpu()
+	outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False).detach().cpu()
 	answer = tokenizer.decode(outputs[0], skip_special_tokens=False)
 	print(answer)
 
 
 #==============================================================================================
-if __name__ == "__main__":	
+if __name__ == "__main__":
 	loader = GDSWeights("./gds_export/manifest.json")
 	device = torch.device("cuda")	
 	model_id = "meta-llama/Llama-3.2-1B-Instruct" #Qwen/Qwen2-0.5B | Qwen/Qwen2-0.5B-Instruct | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "meta-llama/Llama-3.2-1B-Instruct" | "meta-llama/Llama-3.2-1B"

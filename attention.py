@@ -2,6 +2,142 @@ import torch
 import math
 from typing import Optional
 
+def online_chunked_grouped_attention_rope_no_mask(
+    q,                    # (B, Hq, Lq, D)  -- RoPE already applied to q
+    k,                    # (B, Hkv, Lk, D) -- RoPE already applied to k
+    v,                    # (B, Hkv, Lk, D)
+    position_ids: Optional[torch.Tensor] = None,  # (B, L) or (L,) -- not used for masking here
+    q_block_size: int = 64,
+    k_block_size: int = 512,
+    eps: float = 1e-12,
+):
+    """
+    Online chunked grouped multi-head attention WITHOUT masking (inference-only).
+    - q: (B, Hq, Lq, D) (RoPE already applied)
+    - k: (B, Hkv, Lk, D) (RoPE already applied)
+    - v: (B, Hkv, Lk, D)
+    - position_ids: accepted for API compatibility (came from RoPE) but NOT used here.
+    Returns:
+      out: (B, Hq, Lq, D)
+    Notes:
+      * This does streaming softmax (log-sum-exp merge) across k-blocks.
+      * Internal accumulators are float32 even if inputs are fp16 for numeric stability.
+      * No causal or other masking is applied — it's pure full attention (softmax over all keys).
+    """
+    assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4
+    B, Hq, Lq, D = q.shape
+    _, Hkv, Lk, Dk = k.shape
+    assert D == Dk and v.shape == (B, Hkv, Lk, D)
+
+    device = q.device
+    dtype = q.dtype
+    scale = 1.0 / math.sqrt(D)
+
+    # head mapping Hq -> Hkv (bucket each consecutive group to a kv head)
+    group_size = (Hq + Hkv - 1) // Hkv 
+    head_mapping = torch.arange(Hq, device=device) // group_size  # (Hq,)
+    groups = []
+    for hkv in range(Hkv):
+        q_head_idxs = (head_mapping == hkv).nonzero(as_tuple=False).squeeze(1)
+        groups.append(q_head_idxs if q_head_idxs.numel() > 0 else None)
+
+    # position_ids are not used here, but keep signature for compatibility
+    # (they should match the RoPE you applied to q/k upstream).
+    if position_ids is not None:
+        # basic sanity move to device (we don't use it further)
+        if position_ids.dim() == 1:
+            _ = position_ids.unsqueeze(0).expand(B, -1).to(device)
+        else:
+            _ = position_ids.to(device)
+
+    out = torch.zeros((B, Hq, Lq, D), device=device, dtype=dtype)
+
+    # iterate over each KV head group (vectorized over batch and group's q-heads)
+    for hkv_idx, q_head_idxs in enumerate(groups):
+        if q_head_idxs is None:
+            continue
+
+        # k_h, v_h: (B, Lk, D) float32
+        k_h = k[:, hkv_idx].to(torch.float32)
+        v_h = v[:, hkv_idx].to(torch.float32)
+
+        # q_sub: (B, Hq_g, Lq, D) float32
+        q_sub = q[:, q_head_idxs].to(torch.float32)
+        Hq_g = q_sub.shape[1]
+
+        # process q in q-blocks so we keep accumulators small
+        for q_start in range(0, Lq, q_block_size):
+            q_end = min(Lq, q_start + q_block_size)
+            Bq = q_end - q_start
+
+            q_block = q_sub[:, :, q_start:q_end, :]  # (B, Hq_g, Bq, D)
+
+            # accumulators (float32)
+            # m: running max, s: running sum of exp in that frame, wv: running weighted V
+            m = torch.full((B, Hq_g, Bq), float("-inf"), device=device, dtype=torch.float32)
+            s = torch.zeros((B, Hq_g, Bq), device=device, dtype=torch.float32)
+            wv = torch.zeros((B, Hq_g, Bq, D), device=device, dtype=torch.float32)
+
+            # iterate over k-blocks
+            for k_start in range(0, Lk, k_block_size):
+                k_end = min(Lk, k_start + k_block_size)
+                Bk = k_end - k_start
+
+                k_block = k_h[:, k_start:k_end, :]   # (B, Bk, D)
+                v_block = v_h[:, k_start:k_end, :]   # (B, Bk, D)
+
+                # scores: (B, Hq_g, Bq, Bk)
+                scores = torch.einsum("b h q d, b k d -> b h q k", q_block, k_block) * scale
+
+                # compute local max per row over k
+                local_max = torch.amax(scores, dim=-1)  # (B, Hq_g, Bq)
+                exp_scores = torch.exp(scores - local_max.unsqueeze(-1))  # (B, Hq_g, Bq, Bk)
+                sum_exp = exp_scores.sum(dim=-1)  # (B, Hq_g, Bq)
+                weighted_v_chunk = torch.einsum("b h q k, b k d -> b h q d", exp_scores, v_block)  # (B, Hq_g, Bq, D)
+
+                # merge with global accumulators using log-sum-exp merging
+                first_chunk_mask = torch.isinf(m)  # True where uninitialized
+                # initialize where first_chunk_mask is True
+                if first_chunk_mask.any():
+                    init_idx = first_chunk_mask
+                    m[init_idx] = local_max[init_idx]
+                    s[init_idx] = sum_exp[init_idx]
+                    wv[init_idx] = weighted_v_chunk[init_idx]
+
+                # merge where already initialized
+                merge_idx = ~first_chunk_mask
+                if merge_idx.any():
+                    m_old = m[merge_idx]
+                    s_old = s[merge_idx]
+                    wv_old = wv[merge_idx]
+                    lm_new = local_max[merge_idx]
+                    se_new = sum_exp[merge_idx]
+                    wv_new = weighted_v_chunk[merge_idx]
+
+                    new_m = torch.maximum(m_old, lm_new)
+                    alpha = torch.exp(m_old - new_m)
+                    beta = torch.exp(lm_new - new_m)
+
+                    s[merge_idx] = s_old * alpha + se_new * beta
+                    wv[merge_idx] = wv_old * alpha.unsqueeze(-1) + wv_new * beta.unsqueeze(-1)
+                    m[merge_idx] = new_m
+
+                # release temporaries
+                del scores, local_max, exp_scores, sum_exp, weighted_v_chunk, k_block, v_block
+
+            # finalize output for this q_block
+            denom = s.unsqueeze(-1) + eps  # (B, Hq_g, Bq, 1)
+            out_block = (wv / denom).to(dtype)  # cast back to original dtype
+
+            # write into output tensor
+            out[:, q_head_idxs, q_start:q_end, :] = out_block
+
+            # free accumulators
+            del m, s, wv, out_block, denom, q_block
+
+    return out
+
+
 def online_chunked_grouped_attention_rope(
     q,                    # (B, Hq, Lq, D)
     k,                    # (B, Hkv, Lk, D)
@@ -24,7 +160,7 @@ def online_chunked_grouped_attention_rope(
     B, Hq, Lq, D = q.shape
     _, Hkv, Lk, Dk = k.shape
     assert D == Dk and v.shape == (B, Hkv, Lk, D)
-
+    print("attention1.", q.shape, k.shape, v.shape)
     device = q.device
     dtype = q.dtype
     scale = 1.0 / math.sqrt(D)
