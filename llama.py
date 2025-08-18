@@ -144,7 +144,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def load_weights(self): #emptying layers weights for now
 		manifest_map = loader.manifest
 		for name, v in manifest_map.items():
-			if name.startswith("model.layers."):# continue
+			if name.startswith("model.layers."):
 				tensor = torch.tensor(0, device=device)  #loader.load_param_to_cuda(name) #temp
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
@@ -152,12 +152,19 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 		#if torch.cuda.is_available(): torch.cuda.synchronize()
 
 def inference_chat():
-	#sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
-	sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
+	from transformers import QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache
+	sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
+	#sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, truncation=True, max_length=4000, return_tensors="pt").to(device)
-	outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False).detach().cpu()
+	
+	#cache_config = QuantizedCacheConfig(nbits=4)
+	#past_key_values = QuantoQuantizedCache(cache_config=cache_config)	 #OffloadedCache()
+	cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
+	past_key_values = HQQQuantizedCache(cache_config=cache_config)
+
+	outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
 	answer = tokenizer.decode(outputs[0], skip_special_tokens=False)
 	print(answer)
 
@@ -169,7 +176,7 @@ if __name__ == "__main__":
 	model_id = "meta-llama/Llama-3.2-1B-Instruct" #Qwen/Qwen2-0.5B | Qwen/Qwen2-0.5B-Instruct | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "meta-llama/Llama-3.2-1B-Instruct" | "meta-llama/Llama-3.2-1B"
 	tokenizer = AutoTokenizer.from_pretrained(model_id)
 	tokenizer.pad_token = tokenizer.eos_token
-	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu") #cpu | meta
+	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu") #cpu | meta, dtype=should be bfloat16
 	#print(model, "\n\n", model.dtype)
 	model.eval()
 	model.load_weights() #ideally we need to load weights upen their need

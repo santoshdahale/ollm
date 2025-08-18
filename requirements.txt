@@ -1,5 +1,7 @@
 #cupy-cuda{version}x #ex cupy-cuda12x
 
-
-
 pip install kvikio-cu12 
+
+#pip install "optimum[quanto]" #for quantization
+pip install hqq #for HQQQuantize
+
