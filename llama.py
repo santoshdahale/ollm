@@ -4,7 +4,7 @@ import json, time
 import torch
 from torch import nn
 from typing import Callable, Optional, Tuple, Union
-from transformers import AutoTokenizer, LlamaModel, LlamaForCausalLM
+from transformers import AutoTokenizer, AutoConfig, LlamaModel, LlamaForCausalLM, LlamaConfig
 
 from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents
 from gds_loader import GDSWeights
@@ -141,15 +141,24 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
 	
-	def load_weights(self): #emptying layers weights for now
+	def clean_layers_weights(self, device="cpu"):
 		manifest_map = loader.manifest
 		for name, v in manifest_map.items():
 			if name.startswith("model.layers."):
-				tensor = torch.tensor(0, device=device)  #loader.load_param_to_cuda(name) #temp
+				tensor = torch.tensor([0], device=device)  #loader.load_param_to_cuda(name) #temp
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
-				#print("setting 0:", name)
-		#if torch.cuda.is_available(): torch.cuda.synchronize()
+
+	def load_nonlayer_weights(self):
+		manifest_map = loader.manifest
+		for name, v in manifest_map.items():
+			if name.startswith("model.layers."): continue
+			tensor = loader.load_param_to_cuda(name)
+			parent, leaf = _walk_to_parent(self, name)
+			_assign_tensor_to_module(parent, leaf, tensor)
+			print("setting 0:", name)
+	if torch.cuda.is_available(): torch.cuda.synchronize()
+
 
 def inference_chat():
 	from transformers import QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache
@@ -157,7 +166,7 @@ def inference_chat():
 	#sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-	inputs = tokenizer(prompt, truncation=True, max_length=4000, return_tensors="pt").to(device)
+	inputs = tokenizer(prompt, return_tensors="pt").to(device)
 	
 	#cache_config = QuantizedCacheConfig(nbits=4)
 	#past_key_values = QuantoQuantizedCache(cache_config=cache_config)	 #OffloadedCache()
@@ -171,16 +180,20 @@ def inference_chat():
 
 #==============================================================================================
 if __name__ == "__main__":
-	loader = GDSWeights("./gds_export/manifest.json")
-	device = torch.device("cuda")	
-	model_id = "meta-llama/Llama-3.2-1B-Instruct" #Qwen/Qwen2-0.5B | Qwen/Qwen2-0.5B-Instruct | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "meta-llama/Llama-3.2-1B-Instruct" | "meta-llama/Llama-3.2-1B"
+	device = torch.device("cuda")
+	loader = GDSWeights("./gds_export/manifest.json")	
+	model_id = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Meta-Llama-3-8B-Instruct"
 	tokenizer = AutoTokenizer.from_pretrained(model_id)
 	tokenizer.pad_token = tokenizer.eos_token
-	model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu") #cpu | meta, dtype=should be bfloat16
-	#print(model, "\n\n", model.dtype)
-	model.eval()
-	model.load_weights() #ideally we need to load weights upen their need
-	#remove_layers_weights(model) #not decreasing anything
-	model.cuda()
-	#print("model -> cuda"); time.sleep(20)	
+	if 1==2: #ini
+		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
+		model.clean_layers_weights()
+		model.save_pretrained("./llama3-1B") #saving model without layers weights
+		tokenizer.save_pretrained("./llama3-1B"); exit() 
+	else:
+		model_id = "./llama3-1B"
+		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cuda", ignore_mismatched_sizes=True)
+		model.eval()
+		#model.cuda()
+	#print("model -> cuda"); time.sleep(20)
 	inference_chat()
