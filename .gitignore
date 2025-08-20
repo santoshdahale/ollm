@@ -1,7 +1,8 @@
 
+kv_cache
 gds_export
 gds_export*
-llama3-*
+models
 
 __pycache__
-/gds_export_llama3_1b
+

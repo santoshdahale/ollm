@@ -1,17 +1,21 @@
 # efficiant Llama that run on consumer PC
 # venv: US1-asr3.12
-import json, time
+import json, time, os, shutil
+from datetime import datetime
 import torch
 from torch import nn
-from typing import Callable, Optional, Tuple, Union
-from transformers import AutoTokenizer, AutoConfig, LlamaModel, LlamaForCausalLM, LlamaConfig
+from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM, LlamaConfig
+from transformers import Cache, QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache, DynamicCache
 
 from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents
 from gds_loader import GDSWeights
 from attention import online_chunked_grouped_attention_rope_no_mask as chunked_attention
 
+
 #======== rewriting core classes tested on transformers==4.52.3 ============== 
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaDecoderLayer, LlamaConfig
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaDecoderLayer, LlamaModel, LlamaConfig
+from transformers.modeling_outputs import BaseModelOutputWithPast
 
 class MyLlamaAttention(LlamaAttention):
 	def forward(
@@ -130,11 +134,121 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 		return out
 
 
+class MyLlamaModel(LlamaModel):
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **flash_attn_kwargs: Optional #Unpack[FlashAttentionKwargs],
+    ) -> BaseModelOutputWithPast:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        if (input_ids is None) ^ (inputs_embeds is not None): raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if not isinstance(past_key_values, (type(None), Cache)): raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
+
+        if inputs_embeds is None: inputs_embeds = self.embed_tokens(input_ids)
+
+        if use_cache and past_key_values is None: past_key_values = DynamicCache()
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        )
+
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
+        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **flash_attn_kwargs,
+            )
+
+            hidden_states = layer_outputs[0]            
+
+        hidden_states = self.norm(hidden_states)
+
+        print("Llama forward finished2", datetime.now()) #meine1
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values if use_cache else None,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
+
 # Monkey-patch
 import transformers.models.llama.modeling_llama as llama_modeling
 llama_modeling.LlamaAttention = MyLlamaAttention
 llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
+llama_modeling.LlamaModel = MyLlamaModel
 #===============================================
+
+class MyKVCache(DynamicCache):	
+	def __init__(self, layers_num):
+		super().__init__()
+		self.cache_folder = "./kv_cache"
+		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)
+		os.makedirs(self.cache_folder)
+
+	def update(
+		self,
+		key_states: torch.Tensor,
+		value_states: torch.Tensor,
+		layer_idx: int,
+		cache_kwargs: Optional[Dict[str, Any]] = None,
+	) -> Tuple[torch.Tensor, torch.Tensor]:
+		#print("MyKVCache", layer_idx, key_states.shape, value_states.shape, cache_kwargs)		
+		tensors = self.load_from_disk(layer_idx)
+		if tensors is not None:
+			self.key_cache[layer_idx], self.value_cache[layer_idx] = tensors
+		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])
+		self.save_to_disk(out, layer_idx)
+		self.key_cache[layer_idx], self.value_cache[layer_idx] = torch.empty(0), torch.empty(0)
+		return out
+
+	def load_from_disk(self, layer_idx, device="cuda:0"):
+		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
+		if not os.path.exists(path): return None
+		tensors = torch.load(path, map_location=device)
+		return tensors
+
+	def save_to_disk(self, tensors, layer_idx):
+		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
+		tensors = (tensors[0].cpu(), tensors[1].cpu())
+		torch.save(tensors, path)
 
 
 class MyLlamaForCausalLM(LlamaForCausalLM):
@@ -144,8 +258,9 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def clean_layers_weights(self, device="cpu"):
 		manifest_map = loader.manifest
 		for name, v in manifest_map.items():
-			if name.startswith("model.layers."):
-				tensor = torch.tensor([0], device=device)  #loader.load_param_to_cuda(name) #temp
+			if name.startswith("model.layers."):				
+				tensor = torch.empty([0], device="cpu")
+				#tensor = torch.empty(v["shape"], dtype=torch.float8_e4m3fn, device="cpu") #[0]
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
 
@@ -161,39 +276,72 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 
 
 def inference_chat():
-	from transformers import QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache
 	sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
 	#sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
-	
-	#cache_config = QuantizedCacheConfig(nbits=4)
-	#past_key_values = QuantoQuantizedCache(cache_config=cache_config)	 #OffloadedCache()
-	cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
-	past_key_values = HQQQuantizedCache(cache_config=cache_config)
-
-	outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
-	answer = tokenizer.decode(outputs[0], skip_special_tokens=False)
-	print(answer)
+	with torch.no_grad():
+		#cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
+		past_key_values = DynamicCache() #MyKVCache(len(model.model.layers)) #HQQQuantizedCache
+		print("generate starting", datetime.now())
+		outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
+		answer = tokenizer.decode(outputs[0], skip_special_tokens=False)
+		print(answer)
 
 
 #==============================================================================================
 if __name__ == "__main__":
 	device = torch.device("cuda")
-	loader = GDSWeights("./gds_export/manifest.json")	
-	model_id = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Meta-Llama-3-8B-Instruct"
-	tokenizer = AutoTokenizer.from_pretrained(model_id)
-	tokenizer.pad_token = tokenizer.eos_token
-	if 1==2: #ini
+	loader = GDSWeights("./gds_export/manifest.json")
+	if 1==0: #prepare model without layers weights
+		model_id = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Meta-Llama-3-8B-Instruct"
+		tokenizer = AutoTokenizer.from_pretrained(model_id)
+		tokenizer.pad_token = tokenizer.eos_token		
 		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
 		model.clean_layers_weights()
-		model.save_pretrained("./llama3-1B") #saving model without layers weights
-		tokenizer.save_pretrained("./llama3-1B"); exit() 
-	else:
-		model_id = "./llama3-1B"
-		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cuda", ignore_mismatched_sizes=True)
+		model.save_pretrained("./models/llama3-1B") #saving model without layers weights
+		tokenizer.save_pretrained("./models/llama3-1B"); exit()
+	elif 2==2: #modeling_utils setting _initialize_weights do nothing maybe helpful
+		model_id = "./models/llama3-8B/"
+		print("loading model:", model_id)
+		tokenizer = AutoTokenizer.from_pretrained(model_id)
+		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True)
+		model.clean_layers_weights()
 		model.eval()
+		#print("model -> cuda"); time.sleep(20)
+		model.cuda()
+	
+	else:
+		def load_with_ignore_mismatched(model, state_dict):
+			model_state = model.state_dict()
+			filtered_state = {}
+
+			for k, v in state_dict.items():
+				if k not in model_state:
+					# key missing in model → skip
+					continue
+				if v.shape != model_state[k].shape:
+					# shape mismatch → skip
+					print(f"Skipping {k}, checkpoint shape {v.shape}, model shape {model_state[k].shape}")
+					continue
+				filtered_state[k] = v
+
+			# load filtered dict
+			missing, unexpected = model.load_state_dict(filtered_state, strict=False)
+			print("Missing keys:", missing)
+			print("Unexpected keys:", unexpected)
+
+		from accelerate import init_empty_weights
+		from safetensors.torch import load_file
+		model_id = "./models/llama3-8B"
+		tokenizer = AutoTokenizer.from_pretrained(model_id)
+		with init_empty_weights():
+			model = MyLlamaForCausalLM(AutoConfig.from_pretrained("./models/llama3-8B/"))
+		state_dict = load_file("./models/llama3-8B/model.safetensors", device="cuda:0")  # or "cpu"		
+		print("./stats loaded")
+		#model.load_state_dict(state_dict, strict=False)
+		load_with_ignore_mismatched(model, state_dict)
 		#model.cuda()
-	#print("model -> cuda"); time.sleep(20)
+
 	inference_chat()
