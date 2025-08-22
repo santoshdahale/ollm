@@ -7,7 +7,7 @@ from torch.utils.dlpack import from_dlpack
 
 DTYPE_MAP = {
     "float16": cp.float16,
-    "bfloat16": cp.float16,  # change if you want true bf16 storage
+    "bfloat16": cp.float16, #cp.dtype('bfloat16'),
     "float32": cp.float32,
     "float64": cp.float64,
     "int8": cp.int8,

@@ -149,7 +149,6 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 			parent, leaf = _walk_to_parent(self, attr_path)
 			# replace with placeholder (keeps module graph intact)
 			_set_meta_placeholder(parent, leaf)
-	
 
 	def forward(self, *args, **kwargs):
 		#self._load_layer_weights()
@@ -158,7 +157,15 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 		return out
 
 
+
 class MyLlamaModel(LlamaModel):
+	def load_layers(self, processing_layers): #v2
+		n = len(self.layers)
+		for layer_idx in range(n):
+			while len(processing_layers) >= 3: time.sleep(0.01) #wait			
+			self.layers[layer_idx]._load_layer_weights()
+			processing_layers.add(layer_idx)
+
 	def forward(
 		self,
 		input_ids: Optional[torch.LongTensor] = None,
@@ -208,15 +215,22 @@ class MyLlamaModel(LlamaModel):
 		all_hidden_states = () if output_hidden_states else None
 		all_self_attns = () if output_attentions else None
 
-		#=== meine        
-		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-			p1 = None
-			if layer_idx+1 < len(self.layers):
-				#self.layers[layer_idx+1]._load_layer_weights2(loader.manifest) #primitive
-				p1 = threading.Thread(target=self.layers[layer_idx+1]._load_layer_weights, args=()) #loader.manifest,
-				p1.start()
+		#============= meine ==============
+		"""
+		p1 = None #v2
+		processing_layers = set()
+		p1 = threading.Thread(target=self.load_layers, args=(processing_layers,))
+		p1.start()
+		"""
 
+		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
+			#while layer_idx not in processing_layers: time.sleep(0.02) #v2			
+			p1 = None #v1
+			if layer_idx+1 < len(self.layers):
+				p1 = threading.Thread(target=self.layers[layer_idx+1]._load_layer_weights, args=())
+				p1.start()
 			if layer_idx==0: decoder_layer._load_layer_weights()
+						
 			layer_outputs = decoder_layer(
 				hidden_states,
 				attention_mask=causal_mask,
@@ -230,14 +244,13 @@ class MyLlamaModel(LlamaModel):
 			)
 			hidden_states = layer_outputs[0]
 			
-			t1 = time.perf_counter()
+			#processing_layers.remove(layer_idx) #v2
 			if p1 is not None: p1.join()
-			print(layer_idx, "p1. join wait s:", time.perf_counter() - t1)
-		#================
+		#====================================
 
 		hidden_states = self.norm(hidden_states)
 
-		print("Llama forward finished2", datetime.now()) #meine1
+		print("Llama forward finished.", datetime.now()) #meine1
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
 			past_key_values=past_key_values if use_cache else None,
@@ -313,14 +326,14 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 
 def inference_chat():
 	sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
-	#sm, um = file_get_contents("./temp/landing_gprompt.txt"), "What can you do?"
+	#sm, um = file_get_contents("./temp/10k_sample.txt"), "What can you do?"
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
 	with torch.no_grad():
 		#cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
-		past_key_values = DynamicCache() #MyKVCache(len(model.model.layers)) #HQQQuantizedCache
-		print("\n\nGenerate starting", datetime.now())
+		past_key_values = None #MyKVCache(len(model.model.layers)) #HQQQuantizedCache
+		print("\n\nGenerate started.", datetime.now(), "input_ids.shape", inputs.input_ids.shape)
 		outputs = model.generate(**inputs, max_new_tokens=30, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
 		answer = tokenizer.decode(outputs[0], skip_special_tokens=False)
 		print(answer)
@@ -329,9 +342,10 @@ def inference_chat():
 #==============================================================================================
 if __name__ == "__main__":
 	device = torch.device("cuda")
-	loader = GDSWeights("./gds_export/manifest.json")
+	loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
+
 	if 1==0: #prepare model without layers weights
-		model_id = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Meta-Llama-3-8B-Instruct"
+		model_id = "meta-llama/Llama-3.2-1B-Instruct"
 		tokenizer = AutoTokenizer.from_pretrained(model_id)
 		tokenizer.pad_token = tokenizer.eos_token		
 		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
@@ -339,7 +353,7 @@ if __name__ == "__main__":
 		model.save_pretrained("./models/llama3-1B") #saving model without layers weights
 		tokenizer.save_pretrained("./models/llama3-1B"); exit()
 	
-	elif 2==2: #modeling_utils setting _initialize_weights do nothing maybe helpful		
+	elif 2==2:
 		model_id = "./models/llama3-8B/"
 		print("loading model:", model_id)
 		tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -353,7 +367,6 @@ if __name__ == "__main__":
 		def load_with_ignore_mismatched(model, state_dict):
 			model_state = model.state_dict()
 			filtered_state = {}
-
 			for k, v in state_dict.items():
 				if k not in model_state:
 					# key missing in model → skip

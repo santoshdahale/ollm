@@ -4,7 +4,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoConfig
 from safetensors.torch import load_file as load_safetensors
 
-MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Llama-3.2-8B-Instruct"
+MODEL_ID = "meta-llama/Llama-3.2-1B-Instruct" #"meta-llama/Meta-Llama-3-8B-Instruct"
 OUT_DIR = "gds_export"
 os.makedirs(OUT_DIR, exist_ok=True)
 
