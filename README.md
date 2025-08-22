@@ -1,4 +1,4 @@
-# localLLM
+# localLLM or oxllm or crocollm
  
 | Model   | Weights | KV cache | Hidden states | Emb+Head | **Total**    | 
 | ------- | ------- | -------- | ------------- | -------- | ------------ |
@@ -11,11 +11,10 @@
 ## llama3-3B (meta-llama/Llama-3.2-3B-Instruct) with model weights on SSD NVMe
 - on simple test (30 tokens generation with simple output) took
   no parallel = 58s, loading next in thread = 49s, up to 3 in parallel = 48s
-
 - on 10k test (max_tokens=30) took: 1 next in thread = 5min52s (after 1st token, following ones took only 2/3 seconds each)
 
 
-## llama3-8B (meta-llama/Llama-3.1-8B-Instruct)
-
-
+## llama3-8B (meta-llama/Llama-3.1-8B-Instruct). Default: NoKVCache, attention(q_block_size=64, k_block_size=512)
+- on simple test (input=46, output=30 tokens) took: 1NextInThread =  3min54s
+- on 10k test (max_tokens=30) took: 1NextInThread  = 8min57s (after 1st token, following ones took 7-8 seconds each)
 
