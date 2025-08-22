@@ -40,7 +40,7 @@ class MyLlamaAttention(LlamaAttention):
 		value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)        
 		#print(query_states.shape, key_states.shape, value_states.shape); exit()
 
-		cos, sin = position_embeddings
+		cos, sin = position_embeddings		
 		query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
 		if past_key_value is not None:
@@ -49,8 +49,7 @@ class MyLlamaAttention(LlamaAttention):
 			key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
 		#===
-
-		attn_output1 = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"]).transpose(1, 2) #transpose?
+		attn_output = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"]).transpose(1, 2)
 		attn_weights = None
 		"""
 		attention_interface: Callable = eager_attention_forward
@@ -67,7 +66,8 @@ class MyLlamaAttention(LlamaAttention):
 		"""
 		#print(attn_output1.shape, attn_output.shape)
 		#print("Error:", (attn_output1 - attn_output).abs().max().item())
-		attn_output = attn_output1
+		del query_states, key_states, value_states
+		torch.cuda.empty_cache()  # free up GPU memory immediately
 		#===
 		attn_output = attn_output.reshape(*input_shape, -1).contiguous()
 		attn_output = self.o_proj(attn_output)
@@ -121,7 +121,6 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 
 		# optionally synchronize if your loader uses async DMA
 		#if torch.cuda.is_available(): torch.cuda.synchronize()
-
 	
 	def _load_layer_weights2(self, manifest): #0.038seconds to join on 1B
 		#torch.cuda.set_device(device_id)		
@@ -141,7 +140,6 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 		# optionally synchronize if your loader uses async DMA
 		#if torch.cuda.is_available(): torch.cuda.synchronize()
 
-
 	def _unload_layer_weights(self):
 		"""Replace each loaded attribute with a meta placeholder to free GPU memory."""
 		manifest_map = self._layer_param_manifest_names()
@@ -159,12 +157,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 
 
 class MyLlamaModel(LlamaModel):
-	def load_layers(self, processing_layers): #v2
-		n = len(self.layers)
-		for layer_idx in range(n):
-			while len(processing_layers) >= 3: time.sleep(0.01) #wait			
-			self.layers[layer_idx]._load_layer_weights()
-			processing_layers.add(layer_idx)
+	#self.parent_lm_head is set
 
 	def forward(
 		self,
@@ -215,22 +208,16 @@ class MyLlamaModel(LlamaModel):
 		all_hidden_states = () if output_hidden_states else None
 		all_self_attns = () if output_attentions else None
 
-		#============= meine ==============
-		"""
-		p1 = None #v2
-		processing_layers = set()
-		p1 = threading.Thread(target=self.load_layers, args=(processing_layers,))
-		p1.start()
-		"""
+		#============= meine ==============		
+		self.embed_tokens.cpu(); self.parent_lm_head.cpu()
+		torch.cuda.empty_cache()
 
-		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-			#while layer_idx not in processing_layers: time.sleep(0.02) #v2			
-			p1 = None #v1
+		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):			
+			p1 = None # 1NextInThread
 			if layer_idx+1 < len(self.layers):
 				p1 = threading.Thread(target=self.layers[layer_idx+1]._load_layer_weights, args=())
 				p1.start()
-			if layer_idx==0: decoder_layer._load_layer_weights()
-						
+			if layer_idx==0: decoder_layer._load_layer_weights()			
 			layer_outputs = decoder_layer(
 				hidden_states,
 				attention_mask=causal_mask,
@@ -242,14 +229,14 @@ class MyLlamaModel(LlamaModel):
 				position_embeddings=position_embeddings,
 				**flash_attn_kwargs,
 			)
-			hidden_states = layer_outputs[0]
-			
-			#processing_layers.remove(layer_idx) #v2
+			hidden_states = layer_outputs[0]					
 			if p1 is not None: p1.join()
+
+		self.embed_tokens.to(device); self.parent_lm_head.to(device)
 		#====================================
 
 		hidden_states = self.norm(hidden_states)
-
+		
 		print("Llama forward finished.", datetime.now()) #meine1
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
@@ -303,6 +290,7 @@ class MyKVCache(DynamicCache):
 class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
+		self.model.parent_lm_head = self.lm_head #link
 	
 	def clean_layers_weights(self, device="cpu"):
 		manifest_map = loader.manifest
@@ -332,7 +320,7 @@ def inference_chat():
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
 	with torch.no_grad():
 		#cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
-		past_key_values = None #MyKVCache(len(model.model.layers)) #HQQQuantizedCache
+		past_key_values = MyKVCache(len(model.model.layers)) #HQQQuantizedCache
 		print("\n\nGenerate started.", datetime.now(), "input_ids.shape:", inputs.input_ids.shape)
 		outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
 		answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=False)
@@ -341,13 +329,13 @@ def inference_chat():
 
 #==============================================================================================
 if __name__ == "__main__":
-	device = torch.device("cuda")
+	device = torch.device("cuda:0")
 	loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
 
 	if 1==0: #prepare model without layers weights
 		model_id = "meta-llama/Llama-3.2-1B-Instruct"
 		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		tokenizer.pad_token = tokenizer.eos_token		
+		tokenizer.pad_token = tokenizer.eos_token
 		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
 		model.clean_layers_weights()
 		model.save_pretrained("./models/llama3-1B") #saving model without layers weights
@@ -360,9 +348,7 @@ if __name__ == "__main__":
 		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 		model.clean_layers_weights()
 		model.eval()
-		#print("model -> cuda"); time.sleep(20)
 		model.cuda()
-	
 	else:
 		def load_with_ignore_mismatched(model, state_dict):
 			model_state = model.state_dict()

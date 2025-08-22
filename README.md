@@ -17,4 +17,3 @@
 ## llama3-8B (meta-llama/Llama-3.1-8B-Instruct). Default: NoKVCache, attention(q_block_size=64, k_block_size=512)
 - on simple test (input=46, output=30 tokens) took: 1NextInThread =  3min54s
 - on 10k test (max_tokens=30) took: 1NextInThread  = 8min57s (after 1st token, following ones took 7-8 seconds each)
-
