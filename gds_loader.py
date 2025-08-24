@@ -1,5 +1,5 @@
 # gds_loader.py
-import json
+import json, os
 import cupy as cp
 import torch
 import kvikio
@@ -23,6 +23,9 @@ class GDSWeights:
     def load_param_to_cuda(self, name: str) -> torch.Tensor:
         meta = self.manifest[name]
         path, shape, dtype = meta["path"], meta["shape"], meta["dtype"]
+        return self.load_from_disk_to_cuda(path, shape, dtype)
+
+    def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
         cp_dtype = DTYPE_MAP[dtype]
         n_elems = 1
         for s in shape:
@@ -43,7 +46,8 @@ class GDSWeights:
         # Reshape and hand to torch via DLPack
         buf = buf.reshape(shape)
         t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
-        return t
+        return t    
+
 
     def has(self, name: str) -> bool:
         return name in self.manifest

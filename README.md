@@ -1,6 +1,8 @@
 # localLLM or oxllm or crocollm, cllm, ollm
 curl -s https://pypi.org/pypi/<name>/json | jq .
 
+run as PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  python llama.py
+
 | Model   | Weights | KV cache | Hidden states | Emb+Head | **Total**    | 
 | ------- | ------- | -------- | ------------- | -------- | ------------ |
 | **1B**  | 2 GB    | 12.6 GB  | 0.4 GB        | 1.0 GB   | **\~16 GB**  |
@@ -18,5 +20,8 @@ curl -s https://pypi.org/pypi/<name>/json | jq .
 ## llama3-8B (meta-llama/Llama-3.1-8B-Instruct). Default: NoKVCache, attention(q_block_size=64, k_block_size=512)
 - on simple test (input=46, output=30 tokens) took: 1NextInThread =  3min54s
 - on 10k test (max_tokens=30) took: 1NextInThread  = 8min57s (after 1st token, following ones took 7-8 seconds each)
+  Llama forward finished. 2025-08-23 18:53:17.312316 Stats: layer_load: [0.027, 0.003, 0.003, 0.02, 0.063], kvsave: [0.036, 0.055, 0.057, 0.054, 0.055],
+  Llama forward finished. 2025-08-23 18:53:36.691547 Stats: layer_load: [0.024, 0.003, 0.003, 0.02, 0.066], kvload: [2.354, 0.744, 0.242, 0.256, 0.251],
 
-run as PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  python llama.py
+
+

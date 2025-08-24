@@ -9,7 +9,6 @@ from torch import nn
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM, LlamaConfig
 from transformers import Cache, QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache, DynamicCache
-import cupy as cp #need to be moved from here
 
 from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents, Stats
 from gds_loader import GDSWeights
@@ -114,24 +113,18 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 			# add any biases or additional params you need
 		}    
 
-	def _load_layer_weights(self): #0.026 seconds to join on 1B
-		"""
-		loader.load_tensor(manifest_name) -> torch.Tensor (on CUDA recommended)
-		This function will iterate the manifest map and assign weights into submodules.
-		"""
+	def _load_layer_weights(self):
 		manifest_map = self._layer_param_manifest_names()
 		for attr_path, manifest_name in manifest_map.items():
 			try:
 				t1 = time.perf_counter()
-				tensor = loader.load_param_to_cuda(manifest_name)				
-				stats.set("layer_load", t1)
+				tensor = loader.load_param_to_cuda(manifest_name)
 				parent, leaf = _walk_to_parent(self, attr_path)
 				_assign_tensor_to_module(parent, leaf, tensor)
+				stats.set("layer_load", t1)
 			except Exception as e:
 				# Be explicit about failures so you can debug missing names
 				raise RuntimeError(f"failed to load {manifest_name} into {attr_path}: {e}")
-
-		# optionally synchronize if your loader uses async DMA
 		#if torch.cuda.is_available(): torch.cuda.synchronize()
 
 	def _unload_layer_weights(self):
@@ -225,14 +218,14 @@ class MyLlamaModel(LlamaModel):
 				**flash_attn_kwargs,
 			)
 			hidden_states = layer_outputs[0]					
-			if p1 is not None: p1.join()			
+			if p1 is not None: p1.join()
 
 		self.embed_tokens.to(device); self.parent_lm_head.to(device)
 		#====================================
 
 		hidden_states = self.norm(hidden_states)
 		
-		print("\nLlama forward finished.", datetime.now(), stats.print_and_clean())
+		print("\n./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean())
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
 			past_key_values=past_key_values if use_cache else None,
@@ -249,9 +242,9 @@ llama_modeling.LlamaModel = MyLlamaModel
 #===============================================
 
 class MyKVCache(DynamicCache):
-	def __init__(self, layers_num):
+	def __init__(self, layers_num, cache_folder="./kv_cache"):
 		super().__init__()
-		self.cache_folder = "./kv_cache"
+		self.cache_folder = os.path.join(cache_folder, "kv_cache")
 		self.key_cache2, self.value_cache2 = [], []
 		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)
 		os.makedirs(self.cache_folder)
@@ -263,7 +256,6 @@ class MyKVCache(DynamicCache):
 		layer_idx: int,
 		cache_kwargs: Optional[Dict[str, Any]] = None,
 	) -> Tuple[torch.Tensor, torch.Tensor]:
-		#print("MyKVCache", layer_idx, key_states.shape, value_states.shape, cache_kwargs)		
 		tensors = self.load_from_disk(layer_idx)
 		if tensors is not None:
 			self.key_cache[layer_idx], self.value_cache[layer_idx] = tensors
@@ -292,7 +284,7 @@ class MyKVCache(DynamicCache):
 	def save_to_disk(self, tensors, layer_idx):
 		t1 = time.perf_counter()
 		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		tensors = (tensors[0].cpu(), tensors[1].cpu())		
+		tensors = (tensors[0].cpu(), tensors[1].cpu())
 		torch.save(tensors, path)
 		stats.set("kvsave", t1)
 
@@ -323,15 +315,15 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 
 
 def inference_chat():
-	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 30
-	sm, um, max_new_tokens = file_get_contents("./temp/10k_sample.txt"), "What's common between these article?", 30
+	sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 10
+	#sm, um, max_new_tokens = file_get_contents("./temp/10k_sample.txt"), "What's common between these article?", 20
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
 	with torch.no_grad():
 		#cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
-		past_key_values = MyKVCache(len(model.model.layers)) #HQQQuantizedCache
-		print("\n\nGenerate started.", datetime.now(), "input_ids.shape:", inputs.input_ids.shape)
+		past_key_values = MyKVCache(len(model.model.layers), cache_folder="/media/mega4alik/ssd/kv_cache/") #HQQQuantizedCache
+		print("\n\nGenerate started.", datetime.now().strftime("%H:%M:%S"), "input_ids.shape:", inputs.input_ids.shape)
 		outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
 		answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=False)
 		print(answer)

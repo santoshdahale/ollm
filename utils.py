@@ -24,7 +24,7 @@ class Stats:
     def print_and_clean(self):
         st = "Stats:"
         for name, a in self.d.items():
-            st+=f" {name}: {a[:5]},"
+            st+=f" {name}: {a[:5]} t:{sum(a)},"
         self.d = {}
         return st
 
