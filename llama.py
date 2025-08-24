@@ -220,12 +220,11 @@ class MyLlamaModel(LlamaModel):
 			hidden_states = layer_outputs[0]					
 			if p1 is not None: p1.join()
 
-		self.embed_tokens.to(device); self.parent_lm_head.to(device)
-		#====================================
-
 		hidden_states = self.norm(hidden_states)
-		
+		self.embed_tokens.to(device); self.parent_lm_head.to(device)
 		print("\n./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean())
+		#====================================
+		
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
 			past_key_values=past_key_values if use_cache else None,
@@ -315,8 +314,8 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 
 
 def inference_chat():
-	sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 10
-	#sm, um, max_new_tokens = file_get_contents("./temp/10k_sample.txt"), "What's common between these article?", 20
+	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 10
+	sm, um, max_new_tokens = file_get_contents("./temp/85k_sample.txt"), "What's common between these article?", 20
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
