@@ -1,25 +1,27 @@
-# efficiant Llama that run on consumer PC
-# venv: US1-asr3.12
+# efficiant Llama that runs on consumer PC with 8GB VRAM
+
 import json, time, os, shutil
 from datetime import datetime
-import cupy as cp #need to be moved from here
+import threading
 import numpy as np
 import torch
 from torch import nn
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM, LlamaConfig
 from transformers import Cache, QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache, DynamicCache
+import cupy as cp #need to be moved from here
 
-from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents
+from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents, Stats
 from gds_loader import GDSWeights
 from attention import online_chunked_grouped_attention_rope_no_mask as chunked_attention
 
-#import torch.multiprocessing as mp
-#mp.set_start_method("fork") 
-import threading
+#torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True #keep fp16 instead if fp32 in matmul (risky, but normally ok for inference)
+#torch.backends.cuda.matmul.allow_tf32 = True
+#torch.use_deterministic_algorithms(True) #set not memory consuming algs for matmul in MLP
+#torch.set_float32_matmul_precision("medium")
 
 #======== rewriting core classes tested on transformers==4.52.3 ============== 
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaDecoderLayer, LlamaModel, LlamaConfig
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaMLP, LlamaDecoderLayer, LlamaModel, LlamaConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 class MyLlamaAttention(LlamaAttention):
@@ -48,8 +50,8 @@ class MyLlamaAttention(LlamaAttention):
 			cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 			key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-		#===
-		attn_output = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"]).transpose(1, 2)
+		#===		
+		attn_output = chunked_attention(query_states, key_states, value_states, position_ids=kwargs["position_ids"], q_block_size=32768, k_block_size=(1024 if input_shape[1] > 128 else 1000000)).transpose(1, 2)
 		attn_weights = None
 		"""
 		attention_interface: Callable = eager_attention_forward
@@ -67,12 +69,24 @@ class MyLlamaAttention(LlamaAttention):
 		#print(attn_output1.shape, attn_output.shape)
 		#print("Error:", (attn_output1 - attn_output).abs().max().item())
 		del query_states, key_states, value_states
-		torch.cuda.empty_cache()  # free up GPU memory immediately
 		#===
 		attn_output = attn_output.reshape(*input_shape, -1).contiguous()
 		attn_output = self.o_proj(attn_output)
 		return attn_output, attn_weights
 
+
+class MyLlamaMLP(LlamaMLP):
+	def forward(self, x): #down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+		chunk_size, chunks = 16384, []
+		x = x.squeeze(0)
+		for i in range(0, x.shape[0], chunk_size):
+			gate_chunk = self.act_fn(self.gate_proj(x[i:i+chunk_size]))
+			#print("gate:", gate_chunk.dtype, gate_chunk.shape, self.tensor_size_gb(gate_chunk))
+			up_chunk = self.up_proj(x[i:i+chunk_size])
+			out_chunk = self.down_proj(gate_chunk * up_chunk)
+			chunks.append(out_chunk)
+		down_proj = torch.cat(chunks, dim=0).unsqueeze(0) #T,C->1,T,C
+		return down_proj
 
 
 class MyLlamaDecoderLayer(LlamaDecoderLayer):
@@ -108,29 +122,9 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 		manifest_map = self._layer_param_manifest_names()
 		for attr_path, manifest_name in manifest_map.items():
 			try:
-				# 1) load tensor from loader
-				#tensor = loader.load_tensor(manifest_name)  # MUST return a torch.Tensor ideally on CUDA
-				tensor = loader.load_param_to_cuda(manifest_name)
-
-				# 2) assign into local module
-				parent, leaf = _walk_to_parent(self, attr_path)
-				_assign_tensor_to_module(parent, leaf, tensor)
-			except Exception as e:
-				# Be explicit about failures so you can debug missing names
-				raise RuntimeError(f"failed to load {manifest_name} into {attr_path}: {e}")
-
-		# optionally synchronize if your loader uses async DMA
-		#if torch.cuda.is_available(): torch.cuda.synchronize()
-	
-	def _load_layer_weights2(self, manifest): #0.038seconds to join on 1B
-		#torch.cuda.set_device(device_id)		
-		manifest_map = self._layer_param_manifest_names()
-		for attr_path, manifest_name in manifest_map.items():
-			try:
-				attr = manifest[manifest_name]
-				x = np.fromfile(attr["path"], dtype=cp.float16).reshape(attr["shape"])
-				tensor = torch.from_numpy(x)
-				tensor = tensor.to("cuda")
+				t1 = time.perf_counter()
+				tensor = loader.load_param_to_cuda(manifest_name)				
+				stats.set("layer_load", t1)
 				parent, leaf = _walk_to_parent(self, attr_path)
 				_assign_tensor_to_module(parent, leaf, tensor)
 			except Exception as e:
@@ -149,7 +143,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 			_set_meta_placeholder(parent, leaf)
 
 	def forward(self, *args, **kwargs):
-		#self._load_layer_weights()
+		self._load_layer_weights()
 		out = super().forward(*args, **kwargs)
 		self._unload_layer_weights()
 		return out
@@ -209,15 +203,16 @@ class MyLlamaModel(LlamaModel):
 		all_self_attns = () if output_attentions else None
 
 		#============= meine ==============		
-		self.embed_tokens.cpu(); self.parent_lm_head.cpu()
-		torch.cuda.empty_cache()
+		self.embed_tokens.cpu(); self.parent_lm_head.cpu()		
 
-		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):			
+		for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):						
 			p1 = None # 1NextInThread
+			"""
 			if layer_idx+1 < len(self.layers):
 				p1 = threading.Thread(target=self.layers[layer_idx+1]._load_layer_weights, args=())
 				p1.start()
 			if layer_idx==0: decoder_layer._load_layer_weights()			
+			"""
 			layer_outputs = decoder_layer(
 				hidden_states,
 				attention_mask=causal_mask,
@@ -230,14 +225,14 @@ class MyLlamaModel(LlamaModel):
 				**flash_attn_kwargs,
 			)
 			hidden_states = layer_outputs[0]					
-			if p1 is not None: p1.join()
+			if p1 is not None: p1.join()			
 
 		self.embed_tokens.to(device); self.parent_lm_head.to(device)
 		#====================================
 
 		hidden_states = self.norm(hidden_states)
 		
-		print("Llama forward finished.", datetime.now()) #meine1
+		print("\nLlama forward finished.", datetime.now(), stats.print_and_clean())
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
 			past_key_values=past_key_values if use_cache else None,
@@ -248,14 +243,16 @@ class MyLlamaModel(LlamaModel):
 # Monkey-patch
 import transformers.models.llama.modeling_llama as llama_modeling
 llama_modeling.LlamaAttention = MyLlamaAttention
+llama_modeling.LlamaMLP = MyLlamaMLP
 llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
 llama_modeling.LlamaModel = MyLlamaModel
 #===============================================
 
-class MyKVCache(DynamicCache):	
+class MyKVCache(DynamicCache):
 	def __init__(self, layers_num):
 		super().__init__()
 		self.cache_folder = "./kv_cache"
+		self.key_cache2, self.value_cache2 = [], []
 		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)
 		os.makedirs(self.cache_folder)
 
@@ -270,21 +267,34 @@ class MyKVCache(DynamicCache):
 		tensors = self.load_from_disk(layer_idx)
 		if tensors is not None:
 			self.key_cache[layer_idx], self.value_cache[layer_idx] = tensors
-		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])
-		self.save_to_disk(out, layer_idx)
+			if layer_idx < len(self.key_cache2):
+				self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], self.key_cache2[layer_idx]], dim=-2)
+				self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], self.value_cache2[layer_idx]], dim=-2)
+				self.key_cache2[layer_idx] = torch.cat([self.key_cache2[layer_idx], key_states], dim=-2)
+				self.value_cache2[layer_idx] = torch.cat([self.value_cache2[layer_idx], value_states], dim=-2)				
+			else:
+				self.key_cache2.append(key_states)
+				self.value_cache2.append(value_states)
+		
+		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])		
+		if tensors is None: self.save_to_disk(out, layer_idx) #save only first time cause it's slow to save
 		self.key_cache[layer_idx], self.value_cache[layer_idx] = torch.empty(0), torch.empty(0)
 		return out
 
 	def load_from_disk(self, layer_idx, device="cuda:0"):
 		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
 		if not os.path.exists(path): return None
+		t1 = time.perf_counter()
 		tensors = torch.load(path, map_location=device)
+		stats.set("kvload", t1)
 		return tensors
 
 	def save_to_disk(self, tensors, layer_idx):
+		t1 = time.perf_counter()
 		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		tensors = (tensors[0].cpu(), tensors[1].cpu())
+		tensors = (tensors[0].cpu(), tensors[1].cpu())		
 		torch.save(tensors, path)
+		stats.set("kvsave", t1)
 
 
 class MyLlamaForCausalLM(LlamaForCausalLM):
@@ -314,7 +324,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 
 def inference_chat():
 	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 30
-	sm, um, max_new_tokens = file_get_contents("./temp/100k_sample.txt"), "What's common between these article?", 200
+	sm, um, max_new_tokens = file_get_contents("./temp/10k_sample.txt"), "What's common between these article?", 30
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 	inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -331,7 +341,7 @@ def inference_chat():
 if __name__ == "__main__":
 	device = torch.device("cuda:0")
 	loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
-
+	stats = Stats()
 	if 1==0: #prepare model without layers weights
 		model_id = "meta-llama/Llama-3.2-1B-Instruct"
 		tokenizer = AutoTokenizer.from_pretrained(model_id)

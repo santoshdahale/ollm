@@ -1,4 +1,4 @@
-import codecs, io
+import codecs, io, time
 import torch 
 
 def file_put_contents(filename, st):
@@ -10,6 +10,24 @@ def file_get_contents(name):
     f = io.open(name, mode="r", encoding="utf-8") #utf-8 | Windows-1252
     return f.read()
     
+def tensor_size_gb(t: torch.Tensor) -> float:
+    return t.numel() * t.element_size() / 1024**3
+
+class Stats:
+    def __init__(self):
+        self.d = {}
+
+    def set(self, name, t1):
+        if name not in self.d: self.d[name] = []
+        self.d[name].append( round(time.perf_counter() - t1, 3) ) 
+
+    def print_and_clean(self):
+        st = "Stats:"
+        for name, a in self.d.items():
+            st+=f" {name}: {a[:5]},"
+        self.d = {}
+        return st
+
 
 # === Helper utilities ===
 def _walk_to_parent(obj, attr_path):
@@ -69,3 +87,5 @@ def remove_layers_weights(model):
                 module.bias = torch.nn.Parameter(
                     torch.empty(0), requires_grad=False
                 )    
+
+

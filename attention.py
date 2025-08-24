@@ -7,8 +7,8 @@ def online_chunked_grouped_attention_rope_no_mask(
     k,                    # (B, Hkv, Lk, D) -- RoPE already applied to k
     v,                    # (B, Hkv, Lk, D)
     position_ids: Optional[torch.Tensor] = None,  # (B, L) or (L,) -- not used for masking here
-    q_block_size: int = 64,
-    k_block_size: int = 512,
+    q_block_size: int = 32768, #64,
+    k_block_size: int = 1024, #512,
     eps: float = 1e-12,
 ):
     """
