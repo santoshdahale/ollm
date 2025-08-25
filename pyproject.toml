@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollm"
+version = "0.1.0"
+description = "LLM inference library"
+authors = [
+  { name="Anuar Sharafudinov", email="anuarsh@ailabs.us" }
+]
+readme = "README.md"
+license = { file="LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "torch",
+    "transformers", #tested: 
+    "kvikio"
+    #cupy-cuda_version
+]
+
+[project.urls]
+"Homepage" = "https://github.com/Mega4alik/ollm"
+"Bug Tracker" = "https://github.com/Mega4alik/ollm/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

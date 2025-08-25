@@ -1,9 +1,9 @@
 # gds_loader.py
 import json, os
-import cupy as cp
 import torch
-import kvikio
 from torch.utils.dlpack import from_dlpack
+import cupy as cp
+import kvikio
 
 DTYPE_MAP = {
     "float16": cp.float16,
@@ -15,14 +15,15 @@ DTYPE_MAP = {
 }
 
 class GDSWeights:
-    def __init__(self, manifest_path: str, device: str = "cuda"):
+    def __init__(self, path: str): #<model_dir>/gds_export/
+        self.path = path
+        manifest_path = os.path.join(path, 'manifest.json')
         with open(manifest_path) as f:
             self.manifest = json.load(f)
-        self.device = device
 
     def load_param_to_cuda(self, name: str) -> torch.Tensor:
         meta = self.manifest[name]
-        path, shape, dtype = meta["path"], meta["shape"], meta["dtype"]
+        path, shape, dtype = os.path.join(self.path, meta["path"]), meta["shape"], meta["dtype"]
         return self.load_from_disk_to_cuda(path, shape, dtype)
 
     def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
@@ -55,6 +56,6 @@ class GDSWeights:
 
 
 if __name__=="__main__":
-    q = GDSWeights("./gds_export/manifest.json")
+    q = GDSWeights("./gds_export/")
     x = q.load_param_to_cuda("model.layers.0.self_attn.q_proj.weight")
     print(x, x.dtype)

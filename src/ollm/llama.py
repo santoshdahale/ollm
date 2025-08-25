@@ -1,23 +1,20 @@
 # efficiant Llama that runs on consumer PC with 8GB VRAM
 
-import json, time, os, shutil
+import json, time, os
 from datetime import datetime
 import threading
 import numpy as np
 import torch
 from torch import nn
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, LlamaForCausalLM, LlamaConfig
-from transformers import Cache, QuantizedCacheConfig, OffloadedCache, HQQQuantizedCache, QuantoQuantizedCache, QuantizedCache, DynamicCache
+from transformers import LlamaForCausalLM, Cache
 
-from utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, remove_layers_weights, file_get_contents, Stats
-from gds_loader import GDSWeights
-from attention import online_chunked_grouped_attention_rope_no_mask as chunked_attention
+from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
+from .gds_loader import GDSWeights
+from .attention import online_chunked_grouped_attention_rope_no_mask as chunked_attention
 
-#torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True #keep fp16 instead if fp32 in matmul (risky, but normally ok for inference)
-#torch.backends.cuda.matmul.allow_tf32 = True
-#torch.use_deterministic_algorithms(True) #set not memory consuming algs for matmul in MLP
-#torch.set_float32_matmul_precision("medium")
+#global vars
+loader, stats = None, None
 
 #======== rewriting core classes tested on transformers==4.52.3 ============== 
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaMLP, LlamaDecoderLayer, LlamaModel, LlamaConfig
@@ -121,7 +118,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 				tensor = loader.load_param_to_cuda(manifest_name)
 				parent, leaf = _walk_to_parent(self, attr_path)
 				_assign_tensor_to_module(parent, leaf, tensor)
-				stats.set("layer_load", t1)
+				if stats: stats.set("layer_load", t1)
 			except Exception as e:
 				# Be explicit about failures so you can debug missing names
 				raise RuntimeError(f"failed to load {manifest_name} into {attr_path}: {e}")
@@ -221,8 +218,8 @@ class MyLlamaModel(LlamaModel):
 			if p1 is not None: p1.join()
 
 		hidden_states = self.norm(hidden_states)
-		self.embed_tokens.to(device); self.parent_lm_head.to(device)
-		print("\n./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean())
+		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
+		print("\n./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		#====================================
 		
 		return BaseModelOutputWithPast(
@@ -240,53 +237,6 @@ llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
 llama_modeling.LlamaModel = MyLlamaModel
 #===============================================
 
-class MyKVCache(DynamicCache):
-	def __init__(self, layers_num, cache_folder="./kv_cache"):
-		super().__init__()
-		self.cache_folder = os.path.join(cache_folder, "kv_cache")
-		self.key_cache2, self.value_cache2 = [], []
-		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)
-		os.makedirs(self.cache_folder)
-
-	def update(
-		self,
-		key_states: torch.Tensor,
-		value_states: torch.Tensor,
-		layer_idx: int,
-		cache_kwargs: Optional[Dict[str, Any]] = None,
-	) -> Tuple[torch.Tensor, torch.Tensor]:
-		tensors = self.load_from_disk(layer_idx)
-		if tensors is not None:
-			self.key_cache[layer_idx], self.value_cache[layer_idx] = tensors
-			if layer_idx < len(self.key_cache2):
-				self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], self.key_cache2[layer_idx]], dim=-2)
-				self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], self.value_cache2[layer_idx]], dim=-2)
-				self.key_cache2[layer_idx] = torch.cat([self.key_cache2[layer_idx], key_states], dim=-2)
-				self.value_cache2[layer_idx] = torch.cat([self.value_cache2[layer_idx], value_states], dim=-2)				
-			else:
-				self.key_cache2.append(key_states)
-				self.value_cache2.append(value_states)
-		
-		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])		
-		if tensors is None: self.save_to_disk(out, layer_idx) #save only first time cause it's slow to save
-		self.key_cache[layer_idx], self.value_cache[layer_idx] = torch.empty(0), torch.empty(0)
-		return out
-
-	def load_from_disk(self, layer_idx, device="cuda:0"):
-		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		if not os.path.exists(path): return None
-		t1 = time.perf_counter()
-		tensors = torch.load(path, map_location=device)
-		stats.set("kvload", t1)
-		return tensors
-
-	def save_to_disk(self, tensors, layer_idx):
-		t1 = time.perf_counter()
-		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		tensors = (tensors[0].cpu(), tensors[1].cpu())
-		torch.save(tensors, path)
-		stats.set("kvsave", t1)
-
 
 class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
@@ -302,83 +252,4 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
 
-	def load_nonlayer_weights(self):
-		manifest_map = loader.manifest
-		for name, v in manifest_map.items():
-			if name.startswith("model.layers."): continue
-			tensor = loader.load_param_to_cuda(name)
-			parent, leaf = _walk_to_parent(self, name)
-			_assign_tensor_to_module(parent, leaf, tensor)
-			print("setting 0:", name)
-	if torch.cuda.is_available(): torch.cuda.synchronize()
 
-
-def inference_chat():
-	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 10
-	sm, um, max_new_tokens = file_get_contents("./temp/85k_sample.txt"), "What's common between these article?", 20
-	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
-	prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-	inputs = tokenizer(prompt, return_tensors="pt").to(device)
-	with torch.no_grad():
-		#cache_config = QuantizedCacheConfig(nbits=4, axis_key=1, axis_value=1)
-		past_key_values = MyKVCache(len(model.model.layers), cache_folder="/media/mega4alik/ssd/kv_cache/") #HQQQuantizedCache
-		print("\n\nGenerate started.", datetime.now().strftime("%H:%M:%S"), "input_ids.shape:", inputs.input_ids.shape)
-		outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True).detach().cpu()
-		answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=False)
-		print(answer)
-
-
-#==============================================================================================
-if __name__ == "__main__":
-	device = torch.device("cuda:0")
-	loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
-	stats = Stats()
-	if 1==0: #prepare model without layers weights
-		model_id = "meta-llama/Llama-3.2-1B-Instruct"
-		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		tokenizer.pad_token = tokenizer.eos_token
-		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
-		model.clean_layers_weights()
-		model.save_pretrained("./models/llama3-1B") #saving model without layers weights
-		tokenizer.save_pretrained("./models/llama3-1B"); exit()
-	
-	elif 2==2:
-		model_id = "./models/llama3-8B/"
-		print("loading model:", model_id)
-		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
-		model.clean_layers_weights()
-		model.eval()
-		model.cuda()
-	else:
-		def load_with_ignore_mismatched(model, state_dict):
-			model_state = model.state_dict()
-			filtered_state = {}
-			for k, v in state_dict.items():
-				if k not in model_state:
-					# key missing in model → skip
-					continue
-				if v.shape != model_state[k].shape:
-					# shape mismatch → skip
-					print(f"Skipping {k}, checkpoint shape {v.shape}, model shape {model_state[k].shape}")
-					continue
-				filtered_state[k] = v
-
-			# load filtered dict
-			missing, unexpected = model.load_state_dict(filtered_state, strict=False)
-			print("Missing keys:", missing)
-			print("Unexpected keys:", unexpected)
-
-		from accelerate import init_empty_weights
-		from safetensors.torch import load_file
-		model_id = "./models/llama3-8B"
-		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		with init_empty_weights():
-			model = MyLlamaForCausalLM(AutoConfig.from_pretrained("./models/llama3-8B/"))
-		state_dict = load_file("./models/llama3-8B/model.safetensors", device="cuda:0")  # or "cpu"		
-		print("./stats loaded")
-		#model.load_state_dict(state_dict, strict=False)
-		load_with_ignore_mismatched(model, state_dict)
-		#model.cuda()
-
-	inference_chat()
