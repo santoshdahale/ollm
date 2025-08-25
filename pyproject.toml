@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ollm"
-version = "0.1.0"
+version = "0.1.2"
 description = "LLM inference library"
 authors = [
   { name="Anuar Sharafudinov", email="anuarsh@ailabs.us" }
 ]
 readme = "README.md"
 license = { file="LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "torch",
+    "torch", #tested: 2.6.0
     "transformers", #tested: 4.52.3, 
     "kvikio"
     #cupy-cuda_version

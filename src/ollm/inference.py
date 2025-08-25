@@ -1,11 +1,9 @@
-import os, requests
-import zipfile
+import os, requests, zipfile
 import torch
 from transformers import AutoTokenizer
 from .utils import Stats, file_get_contents
 from .gds_loader import GDSWeights
 from . import llama
-#from .llama import MyLlamaForCausalLM
 
 class Inference:
 	def __init__(self, model_id, device="cuda:0"):
@@ -37,6 +35,8 @@ class Inference:
 			zip_ref.extractall(models_dir)
 		print(f"Unpacked to {models_dir}")
 
+		os.remove(zip_path) # Optional: remove the zip file after extraction
+
 	
 	def ini_model(self, models_dir="./models/", force_download=False):
 		models_list = ["llama3-1B-chat", "llama3-3B-chat", "llama3-8B-chat"]
@@ -49,6 +49,7 @@ class Inference:
 		
 		llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 		llama.stats = self.stats
+		print("loading model from", model_dir)
 		self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 		self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 		self.model.clean_layers_weights()

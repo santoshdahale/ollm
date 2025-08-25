@@ -16,7 +16,7 @@ from .attention import online_chunked_grouped_attention_rope_no_mask as chunked_
 #global vars
 loader, stats = None, None
 
-#======== rewriting core classes tested on transformers==4.52.3 ============== 
+#======== rewriting core classes (tested on transformers==4.52.3) ==============
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaMLP, LlamaDecoderLayer, LlamaModel, LlamaConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
