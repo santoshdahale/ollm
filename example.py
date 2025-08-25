@@ -3,8 +3,8 @@ from ollm import Inference, KVCache, file_get_contents
 o = Inference("llama3-1B-chat", device="cuda:0")
 o.ini_model(models_dir="/media/mega4alik/ssd/models/", force_download=False)
 
-sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 30
-#sm, um, max_new_tokens = file_get_contents("./samples/85k_sample.txt"), "What's common between these articles?", 20
+sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
+#sm, um = file_get_contents("./samples/10k_sample.txt"), "What's common between these articles?"
 messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 prompt = o.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 inputs = o.tokenizer(prompt, return_tensors="pt").to(o.device)

@@ -1,8 +1,11 @@
 LICENSE
 README.md
 pyproject.toml
+src/ollm/__init__.py
 src/ollm/attention.py
 src/ollm/gds_loader.py
+src/ollm/inference.py
+src/ollm/kvcache.py
 src/ollm/llama.py
 src/ollm/utils.py
 src/ollm.egg-info/PKG-INFO

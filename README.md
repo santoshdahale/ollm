@@ -1,7 +1,9 @@
-# localLLM or oxllm or crocollm, cllm, ollm
-curl -s https://pypi.org/pypi/<name>/json | jq .
+# oLLM
 
-run as PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  python llama.py
+### Installation 
+#"kvikio" kvikio-cu12 # for CUDA 12
+pip install -e .
+
 
 | Model   | Weights | KV cache | Hidden states | Emb+Head | **Total**    | 
 | ------- | ------- | -------- | ------------- | -------- | ------------ |
@@ -24,4 +26,5 @@ run as PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  python llama.py
   Llama forward finished. 2025-08-23 18:53:36.691547 Stats: layer_load: [0.024, 0.003, 0.003, 0.02, 0.066], kvload: [2.354, 0.744, 0.242, 0.256, 0.251],
 
 
-
+curl -s https://pypi.org/pypi/<name>/json | jq .
+run as PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  python llama.py

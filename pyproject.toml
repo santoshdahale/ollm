@@ -14,10 +14,9 @@ license = { file="LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "torch", #tested: 2.6.0
-    "transformers", #tested: 4.52.3, 
-    "kvikio"
-    #cupy-cuda_version
+    "torch", #tested: 2.6.0, 2.8.0?
+    "transformers>=4.55.0", #tested: 4.52.3(legacy), 4.55.4(new)
+    "accelerate"
 ]
 
 [project.urls]

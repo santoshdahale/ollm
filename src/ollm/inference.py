@@ -13,7 +13,10 @@ class Inference:
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)
-		urls = {"llama3-1B-chat":"https://ollm.s3.us-east-1.amazonaws.com/models/llama3-1B-chat.zip"}
+		urls = {
+			"llama3-1B-chat": "https://ollm.s3.us-east-1.amazonaws.com/models/llama3-1B-chat.zip",
+			"llama3-8B-chat": "https://ollm.s3.us-east-1.amazonaws.com/models/llama3-8B-chat.zip"
+		}
 		url = urls[self.model_id]
 		
 		# Extract filename from URL

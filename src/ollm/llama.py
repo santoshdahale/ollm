@@ -6,7 +6,7 @@ import threading
 import numpy as np
 import torch
 from torch import nn
-from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
+from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
 from transformers import LlamaForCausalLM, Cache
 
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
@@ -17,7 +17,7 @@ from .attention import online_chunked_grouped_attention_rope_no_mask as chunked_
 loader, stats = None, None
 
 #======== rewriting core classes (tested on transformers==4.52.3) ==============
-from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaMLP, LlamaDecoderLayer, LlamaModel, LlamaConfig
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, eager_attention_forward, LlamaAttention, LlamaMLP, LlamaDecoderLayer, LlamaModel, LlamaConfig, create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 class MyLlamaAttention(LlamaAttention):
@@ -148,49 +148,41 @@ class MyLlamaModel(LlamaModel):
 		input_ids: Optional[torch.LongTensor] = None,
 		attention_mask: Optional[torch.Tensor] = None,
 		position_ids: Optional[torch.LongTensor] = None,
-		past_key_values: Optional = None,
+		past_key_values: Optional[Cache] = None,
 		inputs_embeds: Optional[torch.FloatTensor] = None,
-		use_cache: Optional[bool] = None,
-		output_attentions: Optional[bool] = None,
-		output_hidden_states: Optional[bool] = None,
 		cache_position: Optional[torch.LongTensor] = None,
-		**flash_attn_kwargs: Optional #Unpack[FlashAttentionKwargs],
+		use_cache: Optional[bool] = None,
+		**kwargs: Unpack, #[TransformersKwargs]
 	) -> BaseModelOutputWithPast:
-		output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-		output_hidden_states = (
-			output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-		)
-		use_cache = use_cache if use_cache is not None else self.config.use_cache
+		if (input_ids is None) ^ (inputs_embeds is not None):
+			raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-		if (input_ids is None) ^ (inputs_embeds is not None): raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+		if inputs_embeds is None:
+			inputs_embeds: torch.Tensor = self.embed_tokens(input_ids)
 
-		if not isinstance(past_key_values, (type(None), Cache)): raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
-
-		if inputs_embeds is None: inputs_embeds = self.embed_tokens(input_ids)
-
-		if use_cache and past_key_values is None: past_key_values = DynamicCache()
+		if use_cache and past_key_values is None:
+			past_key_values = DynamicCache()
 
 		if cache_position is None:
 			past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-			cache_position = torch.arange(
+			cache_position: torch.Tensor = torch.arange(
 				past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
 			)
 
 		if position_ids is None:
 			position_ids = cache_position.unsqueeze(0)
 
-		causal_mask = self._update_causal_mask(
-			attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+		causal_mask = create_causal_mask(
+			config=self.config,
+			input_embeds=inputs_embeds,
+			attention_mask=attention_mask,
+			cache_position=cache_position,
+			past_key_values=past_key_values,
+			position_ids=position_ids,
 		)
 
 		hidden_states = inputs_embeds
-
-		# create position embeddings to be shared across the decoder layers
 		position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-		# decoder layers
-		all_hidden_states = () if output_hidden_states else None
-		all_self_attns = () if output_attentions else None
 
 		#============= meine ==============		
 		self.embed_tokens.cpu(); self.parent_lm_head.cpu()		
@@ -203,18 +195,15 @@ class MyLlamaModel(LlamaModel):
 				p1.start()
 			if layer_idx==0: decoder_layer._load_layer_weights()			
 			"""
-			layer_outputs = decoder_layer(
+			hidden_states = decoder_layer(
 				hidden_states,
 				attention_mask=causal_mask,
 				position_ids=position_ids,
 				past_key_value=past_key_values,
-				output_attentions=output_attentions,
-				use_cache=use_cache,
 				cache_position=cache_position,
 				position_embeddings=position_embeddings,
-				**flash_attn_kwargs,
+				**kwargs,
 			)
-			hidden_states = layer_outputs[0]					
 			if p1 is not None: p1.join()
 
 		hidden_states = self.norm(hidden_states)
@@ -224,9 +213,7 @@ class MyLlamaModel(LlamaModel):
 		
 		return BaseModelOutputWithPast(
 			last_hidden_state=hidden_states,
-			past_key_values=past_key_values if use_cache else None,
-			hidden_states=all_hidden_states,
-			attentions=all_self_attns,
+			past_key_values=past_key_values,
 		)
 
 # Monkey-patch
