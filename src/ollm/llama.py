@@ -1,6 +1,6 @@
 # efficiant Llama that runs on consumer PC with 8GB VRAM
 
-import json, time, os
+import time, os
 from datetime import datetime
 import threading
 import numpy as np
@@ -219,7 +219,7 @@ class MyLlamaModel(LlamaModel):
 
 		hidden_states = self.norm(hidden_states)
 		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
-		print("\n./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
+		print("./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		#====================================
 		
 		return BaseModelOutputWithPast(
@@ -242,6 +242,10 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
 		self.model.parent_lm_head = self.lm_head #link
+
+	def generate(self, **args):
+		with torch.no_grad():
+			return super().generate(**args)
 	
 	def clean_layers_weights(self, device="cpu"):
 		manifest_map = loader.manifest

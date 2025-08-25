@@ -1,11 +1,60 @@
-import os
+import os, requests
+import zipfile
 import torch
 from transformers import AutoTokenizer
-
 from .utils import Stats, file_get_contents
 from .gds_loader import GDSWeights
 from . import llama
 #from .llama import MyLlamaForCausalLM
+
+class Inference:
+	def __init__(self, model_id, device="cuda:0"):
+		self.model_id = model_id
+		self.device = torch.device(device)
+		self.stats = Stats()
+
+	def download_and_unpack(self, models_dir: str):
+		urls = {"llama3-1B-chat":"<>"}
+		url = urls[self.model_id]
+	    
+	    # Extract filename from URL
+	    filename = url.split("/")[-1]
+	    zip_path = os.path.join(models_dir, filename)
+
+	    # Download the file
+	    print(f"Downloading {url} ...")
+	    response = requests.get(url, stream=True)
+	    response.raise_for_status()
+	    with open(zip_path, "wb") as f:
+	        for chunk in response.iter_content(chunk_size=8192):
+	            f.write(chunk)
+	    print(f"Downloaded to {zip_path}")
+
+	    # Unzip
+	    print(f"Unpacking {zip_path} ...")
+	    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+	        zip_ref.extractall(models_dir)
+	    print(f"Unpacked to {models_dir}")
+
+	
+	def ini_model(self, models_dir="./models/", force_download=False):
+		models_list = ["llama3-1B-chat", "llama3-3B-chat", "llama3-8B-chat"]
+		if self.model_id not in models_list:
+			raise ValueError("Incorrect model id. It must be one of", models_list)
+		
+		model_dir = os.path.join(models_dir, self.model_id)
+
+		self.download_and_unpack(models_dir)
+
+		
+		llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
+		llama.stats = self.stats
+		self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+		self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+		self.model.clean_layers_weights()
+		self.model.eval()
+		self.model.to(self.device)
+
 
 def inference_chat():
 	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 10
@@ -21,31 +70,8 @@ def inference_chat():
 		answer = tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=False)
 		print(answer)
 
-
-class Inference:
-	def __init__(self, model_id, device="cuda:0"):
-		self.model_id = model_id
-		self.device = torch.device(device)
-		self.stats = Stats()
-
-	def ini_model(self, models_dir="./models/", force_download=False):
-		models_list = ["llama3-1B-chat", "llama3-3B-chat", "llama3-8B-chat"]
-		if self.model_id not in models_list:
-			raise ValueError("Incorrect model id. It must be one of", models_list)
-
-		model_dir = os.path.join(models_dir, self.model_id)
-		
-		#download all and mkdir
-
-		llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
-		llama.stats = self.stats
-		self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-		self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
-		self.model.clean_layers_weights()
-		self.model.eval()
-		self.model.to(self.device)
-
 #==============================================================================================
+
 if __name__ == "__main__":
 	device = torch.device("cuda:0")
 	llama.loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
