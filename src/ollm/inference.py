@@ -14,27 +14,28 @@ class Inference:
 		self.stats = Stats()
 
 	def download_and_unpack(self, models_dir: str):
-		urls = {"llama3-1B-chat":"<>"}
+		os.makedirs(models_dir, exist_ok=True)
+		urls = {"llama3-1B-chat":"https://ollm.s3.us-east-1.amazonaws.com/models/llama3-1B-chat.zip"}
 		url = urls[self.model_id]
-	    
-	    # Extract filename from URL
-	    filename = url.split("/")[-1]
-	    zip_path = os.path.join(models_dir, filename)
+		
+		# Extract filename from URL
+		filename = url.split("/")[-1]
+		zip_path = os.path.join(models_dir, filename)
 
-	    # Download the file
-	    print(f"Downloading {url} ...")
-	    response = requests.get(url, stream=True)
-	    response.raise_for_status()
-	    with open(zip_path, "wb") as f:
-	        for chunk in response.iter_content(chunk_size=8192):
-	            f.write(chunk)
-	    print(f"Downloaded to {zip_path}")
+		# Download the file
+		print(f"Downloading {url} ...")
+		response = requests.get(url, stream=True)
+		response.raise_for_status()
+		with open(zip_path, "wb") as f:
+			for chunk in response.iter_content(chunk_size=8192):
+				f.write(chunk)
+		print(f"Downloaded to {zip_path}")
 
-	    # Unzip
-	    print(f"Unpacking {zip_path} ...")
-	    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-	        zip_ref.extractall(models_dir)
-	    print(f"Unpacked to {models_dir}")
+		# Unzip
+		print(f"Unpacking {zip_path} ...")
+		with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+			zip_ref.extractall(models_dir)
+		print(f"Unpacked to {models_dir}")
 
 	
 	def ini_model(self, models_dir="./models/", force_download=False):
@@ -43,9 +44,8 @@ class Inference:
 			raise ValueError("Incorrect model id. It must be one of", models_list)
 		
 		model_dir = os.path.join(models_dir, self.model_id)
-
-		self.download_and_unpack(models_dir)
-
+		if os.path.exists(models_dir)==False or force_download==True:
+			self.download_and_unpack(models_dir)
 		
 		llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 		llama.stats = self.stats
