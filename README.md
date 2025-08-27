@@ -1,4 +1,3 @@
-
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
@@ -15,26 +14,31 @@ LLM Inference for Large-Context Offline Workloads
 
 ## About
 
-oLLM is a lightweight Python library for large-context LLM inference, built on top of Transformers and PyTorch. It enables running models like [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) with 100k context on a ~$200 consumer GPU (8GB VRAM) by offloading layers to SSD.  Example performance: ~20 min for the first token, ~17s per subsequent token. No quantization is used—only fp16 precision. 
+oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  Example performance: ~20 min for the first token, ~17s per subsequent token. No quantization is used—only fp16 precision. 
 
-###  8GB 3060 Ti 100k context inference memory usage:
+###  8GB Nvidia 3060 Ti 100k context inference memory usage:
 
 | Model   | Weights | KV cache | Hidden states | Baseline VRAM (no offload) | oLLM GPU VRAM | oLLM Disk (SSD) |
 | ------- | ------- | -------- | ------------- | ------------ | ---------------- | --------------- |
 | [llama3-1B-chat](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)  | 2 GB (fp16)    | 12.6 GB  | 0.4 GB        | ~16 GB   | ~5 GB       | 18 GB  |
 | [llama3-3B-chat](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)  | 7 GB (fp16)   | 34.1 GB  | 0.61 GB       | ~42 GB   | ~5.3 GB     | 45 GB |
 | [llama3-8B-chat](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)  | 16 GB (fp16)  | 52.4 GB  | 0.8 GB        | ~71 GB   | ~6.6 GB     | 75 GB  |
-| [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (MXFP4)   |  |  |    | Coming..       | Coming..  |
+| [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (mxfp4)   |  |  |    | Coming...       | Coming...  |
 
-<small>By  "Baseline" we mean typical inference without any offloading. It's VRAM usage does not include full attention materialization (it would be **600GB**)</small>
+<small>By  "Baseline" we mean typical inference without any offloading. Its VRAM usage does not include full attention materialization (it would be **600GB**)</small>
 
 How do we achieve this:
 
 - Loading layer weights from SSD directly to GPU one by one
 - Offloading KV cache to SSD and loading back directly to GPU, no quantization or PagedAttention
 - Chunked attention with online softmax. Full attention matrix is never materialized. 
-- Chunked MLP. intermediate upper projection layers may get large, so we chunk MLP as well 
-
+- Chunked MLP. Intermediate upper projection layers may get large, so we chunk MLP as well 
+---
+Typical use cases include:
+- Analyze contracts, regulations, and compliance reports in one pass
+- Summarize or extract insights from massive patient histories or medical literature
+- Process very large log files or threat reports locally
+- Analyze historical chats to extract the most common issues/questions users have
 
 ## Getting Started
 
@@ -44,7 +48,7 @@ python3 -m venv ollm_env
 source ollm_env/bin/activate
 ```
 
-Install oLLM with `pip` or [from source](https://github.com/Mega4alik/ollm):
+Install oLLM with `pip install ollm` or [from source](https://github.com/Mega4alik/ollm):
 
 ```bash
 git clone https://github.com/Mega4alik/ollm.git
@@ -59,7 +63,7 @@ Code snippet sample
 
 ```bash
 from ollm import Inference, KVCache
-o = Inference("llama3-1B-chat", device="cuda:0") #only GPU supported
+o = Inference("llama3-1B-chat", device="cuda:0") #only Nvidia GPU supported
 o.ini_model(models_dir="./models/", force_download=False)
 messages = [{"role":"system", "content":"You are helpful AI assistant"}, {"role":"user", "content":"List planets"}]
 prompt = o.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
