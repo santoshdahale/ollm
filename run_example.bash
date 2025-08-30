@@ -2,4 +2,4 @@
 #export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python example.py
+CUDA_VISIBLE_DEVICES=0 python example.py
