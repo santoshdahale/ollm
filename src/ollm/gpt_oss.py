@@ -1,13 +1,12 @@
 # efficiant gpt-oss-20B that runs on consumer PC with 8GB VRAM
 
-import time, os
+import time, os, math
 from datetime import datetime
-import threading
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
-
 from transformers import GptOssForCausalLM, AutoTokenizer, AutoModelForCausalLM
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
 from .gds_loader import GDSWeights
@@ -17,8 +16,7 @@ from .gds_loader import GDSWeights
 loader, stats = None, None
 
 #======== rewriting core classes (tested on transformers==4.52.3) ==============
-from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssModel, GptOssConfig, GptOssDecoderLayer, create_causal_mask, create_sliding_window_causal_mask
-from transformers.modeling_outputs import MoeModelOutputWithPast
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssModel, GptOssConfig, GptOssDecoderLayer, create_causal_mask, create_sliding_window_causal_mask, repeat_kv, MoeModelOutputWithPast
 
 class MyGptOssAttention(GptOssAttention):
 	def forward(self, *args, **kwargs):
@@ -116,7 +114,9 @@ class MyGptOssModel(GptOssModel):
 		hidden_states = inputs_embeds
 		position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-		# === meine ========================
+		# ===== meine ========================
+		self.embed_tokens.cpu(); self.parent_lm_head.cpu()
+
 		for layer_idx in range(self.config.num_hidden_layers):
 			decoder_layer = self.layers[layer_idx % 2]
 			decoder_layer.layer_idx = layer_idx
@@ -132,20 +132,186 @@ class MyGptOssModel(GptOssModel):
 				**kwargs,
 			)
 
-		print("./gpt_oss.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")			
-		#./===================================
-
+		print("./gpt_oss.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		hidden_states = self.norm(hidden_states)
+		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
+		#./===================================
+		
 		return MoeModelOutputWithPast(
 			last_hidden_state=hidden_states,
 			past_key_values=past_key_values,
 		)
 		
 
+def my_eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,          # (B, Hq, Tq, D)  -- RoPE already applied upstream
+    key: torch.Tensor,            # (B, Hkv, Tk, D) -- RoPE already applied upstream
+    value: torch.Tensor,          # (B, Hkv, Tk, D)
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    q_block_size: int = 64,
+    k_block_size: int = 512,
+    return_attn_weights: bool = False,  # if True, falls back to dense path to produce weights
+    eps: float = 1e-12,
+    **kwargs,
+):
+    """
+    Memory-efficient attention with chunked GEMM + online softmax merging.
+    Matches your original semantics:
+      - repeat_kv() to expand KV heads to Hq
+      - optional attention_mask added to logits
+      - 'sinks' logits are concatenated to keys for normalization, then dropped
+      - dropout applied to probabilities (not renormalized), exactly like F.dropout(scores)
+    Notes:
+      * For very long sequences, returning full attn_weights is impractical; default is None.
+      * RoPE/position_ids should be handled before calling this (as in your snippet).
+    """
+    device = query.device
+    dtype_in = query.dtype
+    B, Hq, Tq, D = query.shape
+
+    # Fast path (optional): if user explicitly wants attention weights, do the dense version.
+    if return_attn_weights:
+        key_states   = repeat_kv(key, module.num_key_value_groups)      # (B, Hq, Tk, D)
+        value_states = repeat_kv(value, module.num_key_value_groups)    # (B, Hq, Tk, D)
+        attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling  # (B,Hq,Tq,Tk)
+        if attention_mask is not None:
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            attn_weights = attn_weights + causal_mask
+
+        # sinks
+        sinks = module.sinks.reshape(1, -1, 1, 1).expand(B, Hq, Tq, -1)  # (B,Hq,Tq,S)
+        combined_logits = torch.cat([attn_weights, sinks], dim=-1)
+        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+        probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
+        scores = probs[..., :-sinks.shape[-1]]  # drop sink columns
+        scores = F.dropout(scores, p=dropout, training=module.training)
+        attn_output = torch.matmul(scores, value_states)                 # (B,Hq,Tq,D)
+        return attn_output.transpose(1, 2).contiguous(), scores
+
+    # --------- Streaming / Chunked path ----------
+    # Repeat KV to match query heads (GQA)
+    key_states   = repeat_kv(key,   module.num_key_value_groups).to(torch.float32)   # (B,Hq,Tk,D)
+    value_states = repeat_kv(value, module.num_key_value_groups).to(torch.float32)   # (B,Hq,Tk,D)
+    query_states = query.to(torch.float32)                                           # (B,Hq,Tq,D)
+
+    B, Hq, Tk, _ = key_states.shape
+    scale = float(scaling)
+
+    # Accumulators for online softmax across key-blocks
+    # m: running max per (B,Hq,Tq), s: running sum of exp in 'm'-frame
+    m  = torch.full((B, Hq, Tq), float("-inf"), device=device, dtype=torch.float32)
+    s  = torch.zeros((B, Hq, Tq), device=device, dtype=torch.float32)
+    wv = torch.zeros((B, Hq, Tq, D), device=device, dtype=torch.float32)
+
+    # Iterate over key blocks
+    for k_start in range(0, Tk, k_block_size):
+        k_end = min(Tk, k_start + k_block_size)
+        k_blk = key_states[:, :, k_start:k_end, :]    # (B,Hq,Bk,D)
+        v_blk = value_states[:, :, k_start:k_end, :]  # (B,Hq,Bk,D)
+
+        # Optional mask slice, same semantics as your code
+        if attention_mask is not None:
+            # attention_mask shape is broadcastable to (B,Hq,Tq,Tk)
+            mask_blk = attention_mask[:, :, :, k_start:k_end]           # (B,H?,Tq,Bk)
+        else:
+            mask_blk = None
+
+        # Process query in blocks for cache-friendliness
+        for q_start in range(0, Tq, q_block_size):
+            q_end = min(Tq, q_start + q_block_size)
+            q_blk = query_states[:, :, q_start:q_end, :]                # (B,Hq,Bq,D)
+
+            # scores = (B,Hq,Bq,Bk)
+            scores = torch.einsum("b h q d, b h k d -> b h q k", q_blk, k_blk) * scale
+
+            if mask_blk is not None:
+                # Add mask (typically 0 or -inf); broadcasting over Hq if mask is (B,1,Tq,Bk)
+                scores = scores + mask_blk[:, :scores.shape[1], q_start:q_end, :]
+
+            # Local max over k for numerical stability
+            local_max = torch.amax(scores, dim=-1)                      # (B,Hq,Bq)
+
+            # exp(scores - local_max)
+            exp_scores = torch.exp(scores - local_max.unsqueeze(-1))    # (B,Hq,Bq,Bk)
+
+            # Dropout on probabilities (exactly like your original): applied BEFORE V matmul,
+            # not renormalized (F.dropout semantics).
+            if module.training and dropout > 0.0:
+                keep_p = 1.0 - dropout
+                # same shape as exp_scores; generate mask on the same device/dtype float32
+                drop_mask = (torch.rand_like(exp_scores) < keep_p).to(exp_scores.dtype) / keep_p
+                exp_scores = exp_scores * drop_mask
+                del drop_mask
+
+            sum_exp = exp_scores.sum(dim=-1)                            # (B,Hq,Bq)
+            weighted_v_chunk = torch.einsum("b h q k, b h k d -> b h q d", exp_scores, v_blk)  # (B,Hq,Bq,D)
+
+            # Merge with global accumulators (log-sum-exp merge)
+            first = torch.isinf(m[:, :, q_start:q_end])                 # (B,Hq,Bq)
+            if first.any():
+                idx = first
+                m[:, :, q_start:q_end][idx]  = local_max[idx]
+                s[:, :, q_start:q_end][idx]  = sum_exp[idx]
+                wv[:, :, q_start:q_end][idx] = weighted_v_chunk[idx]
+
+            merge = ~first
+            if merge.any():
+                m_old = m[:, :, q_start:q_end][merge]                   # (N,)
+                s_old = s[:, :, q_start:q_end][merge]                   # (N,)
+                wv_old = wv[:, :, q_start:q_end][merge]                 # (N,D)
+
+                lm_new = local_max[merge]                               # (N,)
+                se_new = sum_exp[merge]                                 # (N,)
+                wv_new = weighted_v_chunk[merge]                        # (N,D)
+
+                new_m  = torch.maximum(m_old, lm_new)
+                alpha  = torch.exp(m_old - new_m)
+                beta   = torch.exp(lm_new - new_m)
+
+                s[:, :, q_start:q_end][merge]  = s_old * alpha + se_new * beta
+                wv[:, :, q_start:q_end][merge] = wv_old * alpha.unsqueeze(-1) + wv_new * beta.unsqueeze(-1)
+                m[:, :, q_start:q_end][merge]  = new_m
+
+            # free temps
+            del scores, local_max, exp_scores, sum_exp, weighted_v_chunk, q_blk
+
+        del k_blk, v_blk, mask_blk
+
+    # ---- Merge the SINK logits (no V contribution) ----
+    # Your original concatenates sink logits to the last dim, subtracts row-max,
+    # softmax over keys+sink, then drops sink columns before matmul with V.
+    # Equivalent effect: merge sinks into the (m,s) normalizer, leave wv untouched.
+    sinks = module.sinks.reshape(1, -1, 1, 1).expand(B, Hq, Tq, -1).to(torch.float32)  # (B,Hq,Tq,S)
+    # Row-wise max over sink columns
+    sink_max = torch.amax(sinks, dim=-1)                     # (B,Hq,Tq)
+    sink_sumexp = torch.exp(sinks - sink_max.unsqueeze(-1)).sum(dim=-1)  # (B,Hq,Tq)
+
+    # Merge sinks into (m,s); wv has no sink contribution
+    new_m  = torch.maximum(m, sink_max)
+    alpha  = torch.exp(m - new_m)        # scales existing sums in new frame
+    beta   = torch.exp(sink_max - new_m) # scales sink sums in new frame
+    s = s * alpha + sink_sumexp * beta
+    m = new_m
+    del sinks, sink_max, sink_sumexp, new_m, alpha, beta
+
+    # Final normalize: out = wv / s
+    attn_out = (wv / (s.unsqueeze(-1) + eps)).to(dtype_in)   # (B,Hq,Tq,D)
+
+    # Match your return layout: transpose to (B, Tq, Hq, D)
+    attn_out = attn_out.transpose(1, 2).contiguous()
+
+    # We do not materialize attn_weights in streaming mode.
+    return attn_out, None
+
+
 
 import transformers.models.gpt_oss.modeling_gpt_oss as modeling
 modeling.GptOssAttention = MyGptOssAttention
 modeling.GptOssModel = MyGptOssModel
+#modeling.eager_attention_forward = my_eager_attention_forward
 #===============================================
 
 

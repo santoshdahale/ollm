@@ -1,4 +1,4 @@
-import json, os, time
+import json, os, time, math
 import torch
 from torch.utils.dlpack import from_dlpack
 import cupy as cp
@@ -26,9 +26,11 @@ class GDSWeights:
 	def load_param_to_cuda(self, name: str) -> torch.Tensor:
 		meta = self.manifest[name]
 		path, shape, dtype = os.path.join(self.path, meta["path"]), meta["shape"], meta["dtype"]
-		if meta.get("dtype_original")=="mxfp4":
-			return self.load_mxfp4_from_disk(path, shape)
-		else:
+		if meta.get("packed")=="mxfp4":
+			return self.load_mxfp4_from_disk(path, shape, dtype)
+		elif meta.get("dtype").startswith("torch"):
+			return self.load_torch_from_disk(path)
+		else: #kvikio, numpy
 			return self.load_from_disk_to_cuda(path, shape, dtype)
 
 	def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
@@ -58,16 +60,93 @@ class GDSWeights:
 		return name in self.manifest
 
 
-	def load_mxfp4_from_disk(self, path, shape, dtype=torch.float16):
-		packed = torch.load(path, map_location="cuda:0") #assuming packed.dtype==torch.uint8
-		t1 = time.perf_counter()
-		even = (packed >> 4) & 0xF
-		odd = packed & 0xF
-		unpacked = torch.stack([even, odd], dim=-1).flatten()
-		tensor = (unpacked.to(dtype) / 15.0).view(shape) #.to(self.device)
-		if stats: stats.set("unpack_pt1", t1) #24s on CPU
+	def load_torch_from_disk(self, path):
+		tensor = torch.load(path, map_location=self.device)
 		return tensor
 
+	def load_mxfp4_from_disk(self, path, shape, dtype):
+		packed = torch.load(path, map_location=self.device) #{_blocks:t, _scales:t}
+		t1 = time.perf_counter()
+		tensor = convert_moe_packed_tensors(packed["_blocks"], packed["_scales"]).to(self.device)
+		if stats: stats.set("unpack_gpu", t1) #70 seconds on CPU
+		return tensor
+
+
+
+#=========================================================================
+
+FP4_VALUES = [
+	+0.0,
+	+0.5,
+	+1.0,
+	+1.5,
+	+2.0,
+	+3.0,
+	+4.0,
+	+6.0,
+	-0.0,
+	-0.5,
+	-1.0,
+	-1.5,
+	-2.0,
+	-3.0,
+	-4.0,
+	-6.0,
+]
+
+def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
+	blocks,
+	scales,
+	*,
+	dtype: torch.dtype = torch.bfloat16,
+	rows_per_chunk: int = 32768 * 1024,  # TODO these values are not here by mistake ;)
+) -> torch.Tensor:
+	"""
+	Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
+	pass of GPT_OSS.
+	"""
+
+	# Check if blocks and scales are on CPU, and move to GPU if so
+	#if not blocks.is_cuda and torch.cuda.is_available():
+	#    blocks = blocks.cuda()
+	#    scales = scales.cuda()
+
+	scales = scales.to(torch.int32) - 127  # TODO that's because 128=2**7
+
+	assert blocks.shape[:-1] == scales.shape, f"{blocks.shape[:-1]=} does not match {scales.shape=}"
+
+	lut = torch.tensor(FP4_VALUES, dtype=dtype, device=blocks.device)
+
+	*prefix_shape, G, B = blocks.shape
+	rows_total = math.prod(prefix_shape) * G
+
+	blocks = blocks.reshape(rows_total, B)
+	scales = scales.reshape(rows_total, 1)
+
+	out = torch.empty(rows_total, B * 2, dtype=dtype, device=blocks.device)
+
+	for r0 in range(0, rows_total, rows_per_chunk):
+		r1 = min(r0 + rows_per_chunk, rows_total)
+
+		blk = blocks[r0:r1]
+		exp = scales[r0:r1]
+
+		# nibble indices -> int64
+		idx_lo = (blk & 0x0F).to(torch.long)
+		idx_hi = (blk >> 4).to(torch.long)
+
+		sub = out[r0:r1]
+		sub[:, 0::2] = lut[idx_lo]
+		sub[:, 1::2] = lut[idx_hi]
+
+		torch.ldexp(sub, exp, out=sub)
+		del idx_lo, idx_hi, blk, exp, sub
+
+	out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
+	del blocks, scales, lut
+	return out.transpose(1, 2).contiguous()
+
+#=========================================================================
 
 if __name__=="__main__":
 	q = GDSWeights("/media/mega4alik/ssd/models/gpt-oss-20B/gds_export/")
