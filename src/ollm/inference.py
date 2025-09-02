@@ -18,7 +18,7 @@ class Inference:
 			"llama3-1B-chat": "https://ollm.s3.us-east-1.amazonaws.com/models/llama3-1B-chat.zip",
 			"llama3-3B-chat": "https://ollm.s3.us-east-1.amazonaws.com/models/llama3-3B-chat.zip",
 			"llama3-8B-chat": "https://ollm.s3.us-east-1.amazonaws.com/models/llama3-8B-chat.zip",
-			"gpt-oss-20B": "https://ollm.s3.us-east-1.amazonaws.com/models/gpt-oss-20B.zip"
+			"gpt-oss-20B":    "https://ollm.s3.us-east-1.amazonaws.com/models/gpt-oss-20B.zip"
 		}
 		url = urls[self.model_id]
 		
