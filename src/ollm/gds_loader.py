@@ -22,10 +22,14 @@ class GDSWeights:
 		with open(manifest_path) as f:
 			self.manifest = json.load(f)
 		self.device = torch.device(device)
+		self.offloaded_cpu = {}
 
 	def load_param_to_cuda(self, name: str) -> torch.Tensor:
 		meta = self.manifest[name]
 		path, shape, dtype = os.path.join(self.path, meta["path"]), meta["shape"], meta["dtype"]
+		t = self.get_offloaded_from_cpu_to_cuda(name)
+		if t is not None: return t
+
 		if meta.get("packed")=="mxfp4":
 			return self.load_mxfp4_from_disk(path, shape, dtype)
 		elif meta.get("dtype").startswith("torch"):
@@ -65,12 +69,31 @@ class GDSWeights:
 		return tensor
 
 	def load_mxfp4_from_disk(self, path, shape, dtype):
-		packed = torch.load(path, map_location=self.device) #{_blocks:t, _scales:t}
-		t1 = time.perf_counter()
-		tensor = convert_moe_packed_tensors(packed["_blocks"], packed["_scales"]).to(self.device)
-		if stats: stats.set("unpack_gpu", t1) #70 seconds on CPU
+		packed = torch.load(path, map_location=self.device) #{_blocks:t, _scales:t}		
+		tensor = convert_moe_packed_tensors(packed["_blocks"], packed["_scales"]).to(self.device)		
 		return tensor
 
+	def offload_param_to_cpu(self, name):
+		meta = self.manifest[name]
+		path, shape, dtype, packed = os.path.join(self.path, meta["path"]), meta["shape"], meta["dtype"], meta.get("packed")
+		if packed=="mxfp4" or dtype.startswith("torch"):
+			tensor = torch.load(path, map_location="cpu")
+		else: #kvikio, numpy
+			tensor = self.load_from_disk_to_cuda(path, shape, dtype).cpu() #should be without GPU
+		self.offloaded_cpu[name] = {"shape":shape, "dtype":dtype, "packed":packed, "tensor":tensor}
+
+	def get_offloaded_from_cpu_to_cuda(self, name):
+		if name in self.offloaded_cpu:
+			meta = self.offloaded_cpu[name]
+			t, packed = meta["tensor"], meta["packed"]
+			t1 = time.perf_counter()
+			if packed=="mxfp4":
+				tensor = convert_moe_packed_tensors(t["_blocks"].to(self.device), t["_scales"].to(self.device))
+			else:
+				tensor = t.to(self.device)
+			if stats: stats.set("offloaded_cpu_to_cuda", t1)
+			return tensor
+		return None
 
 
 #=========================================================================

@@ -15,7 +15,7 @@ from .gds_loader import GDSWeights
 #global vars
 loader, stats = None, None
 
-#======== rewriting core classes (tested on transformers==4.52.3) ==============
+#======== rewriting core classess ==============
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssModel, GptOssConfig, GptOssDecoderLayer, create_causal_mask, create_sliding_window_causal_mask, repeat_kv, MoeModelOutputWithPast
 
 class MyGptOssAttention(GptOssAttention):
@@ -24,11 +24,8 @@ class MyGptOssAttention(GptOssAttention):
 		#print(self.layer_idx, "attention:", out[0].shape)
 		return out		
 
-class MyGptOssDecoderLayer(GptOssDecoderLayer):
-	def __init__(self, config: GptOssConfig, layer_idx: int):
-		super().__init__(config, layer_idx)	
-		self.layer_idx = layer_idx
-	
+
+class oDecoderLayer:
 	def _get_my_manifests(self):
 		a = []
 		for manifest_name in loader.manifest.keys():
@@ -54,6 +51,12 @@ class MyGptOssDecoderLayer(GptOssDecoderLayer):
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 
+
+class MyGptOssDecoderLayer(GptOssDecoderLayer, oDecoderLayer):
+	def __init__(self, config: GptOssConfig, layer_idx: int):
+		super().__init__(config, layer_idx)	
+		self.layer_idx = layer_idx
+
 	def forward(self, *args, **kwargs):
 		self._load_layer_weights()
 		out = super().forward(*args, **kwargs)
@@ -66,8 +69,7 @@ class MyGptOssModel(GptOssModel):
 		super().__init__(config)
 		self.config = config
 		self.layers = nn.ModuleList([MyGptOssDecoderLayer(config, layer_idx) for layer_idx in range(2)])
-		for decoder_layer in self.layers: decoder_layer._unload_layer_weights()
-		print("./MyGptOssModel init")
+		for decoder_layer in self.layers: decoder_layer._unload_layer_weights()		
 
 	def forward(
 		self,
@@ -319,7 +321,16 @@ class MyGptOssForCausalLM(GptOssForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
 		self.model.parent_lm_head = self.lm_head #link
+		self.num_hidden_layers = config.num_hidden_layers
 
 	def generate(self, **args):
 		with torch.no_grad():
-			return super().generate(**args)		
+			return super().generate(**args)
+
+	def offload_layers_to_cpu(self, layers_num=2):
+		layer = oDecoderLayer()
+		for layer_idx in range(min(layers_num, self.num_hidden_layers)):
+			layer.layer_idx = layer_idx
+			for manifest_name, attr_path in layer._get_my_manifests():
+				loader.offload_param_to_cpu(manifest_name)
+		print("./gpt_oss offloading layers to CPU. Done.")

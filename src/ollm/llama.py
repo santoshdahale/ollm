@@ -229,6 +229,7 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
 		self.model.parent_lm_head = self.lm_head #link
+		self.num_hidden_layers = config.num_hidden_layers
 
 	def generate(self, **args):
 		with torch.no_grad():
@@ -237,10 +238,16 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 	def clean_layers_weights(self, device="cpu"):
 		manifest_map = loader.manifest
 		for name, v in manifest_map.items():
-			if name.startswith("model.layers."):				
+			if name.startswith("model.layers."):
 				tensor = torch.empty([0], device="cpu")
 				#tensor = torch.empty(v["shape"], dtype=torch.float8_e4m3fn, device="cpu") #[0]
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
 
-
+	
+	def offload_layers_to_cpu(self, layers_num=2):
+		for layer_idx in range(min(layers_num, self.num_hidden_layers)):			
+			for name, attr in loader.manifest.items():
+				if name.startswith("model.layers.{layer_idx}."):
+					loader.offload_param_to_cpu(name)
+		print("./Llama offloading layers to CPU. Done.")
