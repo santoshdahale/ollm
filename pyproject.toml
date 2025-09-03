@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ollm"
-version = "0.1.3"
+version = "0.2.0"
 description = " LLM Inference for Large-Context Offline Workloads"
 authors = [
   { name="Anuar Sharafudinov", email="anuarsh@ailabs.us" }
@@ -14,8 +14,8 @@ license = { file="LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
-    "torch", #tested: 2.6.0, 2.8.0?
-    "transformers>=4.55.0", #tested: 4.52.3(legacy), 4.55.4(new)
+    "torch", #tested: 2.6.0, 2.8.0
+    "transformers>=4.55.0,<4.56.0", #tested: 4.55.4(new)
     "accelerate"
 ]
 
