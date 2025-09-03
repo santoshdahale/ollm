@@ -14,7 +14,7 @@ LLM Inference for Large-Context Offline Workloads
 
 ## About
 
-oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b)  is also supported, but without large context (coming). No quantization is used—only fp16/bf16 precision. 
+oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b)  is also supported (large-context is coming soon). No quantization is used—only fp16/bf16 precision. 
 
 ###  8GB Nvidia 3060 Ti 100k context inference memory usage:
 
@@ -31,7 +31,7 @@ How do we achieve this:
 
 - Loading layer weights from SSD directly to GPU one by one
 - Offloading KV cache to SSD and loading back directly to GPU, no quantization or PagedAttention
-- Offloading layer weights to RAM if needed
+- Offloading layer weights to CPU if needed
 - Chunked attention with online softmax. Full attention matrix is never materialized. 
 - Chunked MLP. Intermediate upper projection layers may get large, so we chunk MLP as well 
 ---
@@ -68,7 +68,7 @@ Code snippet sample
 from ollm import Inference, KVCache
 o = Inference("llama3-1B-chat", device="cuda:0") #llama3-1B/3B/8B-chat, gpt-oss-20B
 o.ini_model(models_dir="./models/", force_download=False)
-o.offload_layers_to_cpu(layers_num=2) #(optional) offload some layers to RAM for speed increase
+o.offload_layers_to_cpu(layers_num=2) #(optional) offload some layers to CPU for speed increase
 past_key_values = KVCache(cache_dir="./kv_cache/", stats=o.stats) #set None for small context
 
 messages = [{"role":"system", "content":"You are helpful AI assistant"}, {"role":"user", "content":"List planets"}]
