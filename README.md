@@ -25,14 +25,14 @@ oLLM is a lightweight Python library for large-context LLM inference, built on t
 | [llama3-8B-chat](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)  | 16 GB (fp16)  | 52.4 GB  | 0.8 GB        | ~71 GB   | ~6.6 GB     | 75 GB  |
 | [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (packed bf16) |  | 0.6GB  |    | ~6.4GB, large context support is on the way | 20GB  |
 
-<small>By  "Baseline" we mean typical inference without any offloading. Its VRAM usage does not include full attention materialization (it would be **600GB**)</small>
+<small>By "Baseline" we mean typical inference without any offloading</small>
 
 How do we achieve this:
 
 - Loading layer weights from SSD directly to GPU one by one
 - Offloading KV cache to SSD and loading back directly to GPU, no quantization or PagedAttention
 - Offloading layer weights to CPU if needed
-- Chunked attention with online softmax. Full attention matrix is never materialized. 
+- FlashAttention-2 with online softmax. Full attention matrix is never materialized. 
 - Chunked MLP. Intermediate upper projection layers may get large, so we chunk MLP as well 
 ---
 Typical use cases include:
@@ -41,7 +41,7 @@ Typical use cases include:
 - Process very large log files or threat reports locally
 - Analyze historical chats to extract the most common issues/questions users have
 ---
-Supported **Nvidia GPUs**: RTX 20xx (Turing) -- only Llama3, RTX 30xx (Ampere), RTX 40xx (Ada Lovelace), T4, L4, A10, and newer
+Supported **Nvidia GPUs**: Turing (T4, RTX 20-series, Quadro RTX 6000/8000) -- only Llama3, RTX 30xx, RTX 40xx, L4, A10, and newer
 
 ## Getting Started
 
@@ -81,3 +81,4 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
+

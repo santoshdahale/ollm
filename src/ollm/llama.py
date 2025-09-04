@@ -218,7 +218,7 @@ class MyLlamaModel(LlamaModel):
 
 # Monkey-patch
 import transformers.models.llama.modeling_llama as llama_modeling
-llama_modeling.LlamaAttention = MyLlamaAttention
+#llama_modeling.LlamaAttention = MyLlamaAttention #replaced to stable attn_implementation="flash_attention_2"
 llama_modeling.LlamaMLP = MyLlamaMLP
 llama_modeling.LlamaDecoderLayer = MyLlamaDecoderLayer
 llama_modeling.LlamaModel = MyLlamaModel

@@ -61,7 +61,7 @@ class Inference:
 		else:
 			llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 			llama.stats = self.stats			
-			self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+			self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 			self.model.clean_layers_weights()
 
 		self.model.eval()
