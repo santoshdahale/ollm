@@ -10,7 +10,7 @@ from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, 
 from transformers import GptOssForCausalLM, AutoTokenizer, AutoModelForCausalLM
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder
 from .gds_loader import GDSWeights
-from .gpt_oss_attention import attention
+from .gpt_oss_attention import attention as flash_attention
 
 #global vars
 loader, stats = None, None
@@ -22,118 +22,44 @@ class MyGptOssAttention(GptOssAttention):
 	def forward(self, *args, **kwargs):
 		out = super().forward(*args, **kwargs)
 		#print(self.layer_idx, "attention:", out[0].shape)
-		return out		
+		return out
 
 
 class MyGptOssExperts(GptOssExperts):
-
-	def forward_chunked(self, hidden_states, routing_weights, chunk_size=1):
-		# shapes:
-		# hidden_states: (B, T, H)
-		# gate_up_proj: (E, 2*H, H)
-		# gate_up_proj_bias: (E, 2*H)
-		# down_proj: either shared (out_features, in_features) or per-expert (E, out, in)
-		routing_weights = routing_weights.unsqueeze(0).transpose(1,2)
-		B, T, H = hidden_states.shape
-		E = routing_weights.shape[1]
-		print(self.gate_up_proj.shape, self.gate_up_proj_bias.shape, self.down_proj.shape, "routing_weights:", routing_weights.shape)
-
-		# Prepare accumulator on same device/dtype
-		acc = torch.zeros((B, T, H), device=hidden_states.device, dtype=hidden_states.dtype)
-
-		for e in range(E):
-			# compute gate_up for expert e
-			weight_e = self.gate_up_proj[e].transpose(0,1)  # (2*H, H)
-			bias_e   = self.gate_up_proj_bias[e]     # (2*H,)
-
-			gate_up_e = F.linear(hidden_states, weight_e, bias_e)  # (B, T, 2*H)
-			gate_e = gate_up_e[..., ::2]   # (B, T, H)
-			up_e   = gate_up_e[..., 1::2]  # (B, T, H)
-
-			gate_e.clamp_(max=self.limit)
-			up_e.clamp_(min=-self.limit, max=self.limit)
-
-			glu_e = gate_e * torch.sigmoid(gate_e * self.alpha)
-			up_plus_e = up_e + 1.0
-
-			# down proj for this expert
-			if hasattr(self.down_proj, 'shape') and self.down_proj.dim() == 3:
-				# per-expert down_proj: (E, out, in)
-				down_weight_e = self.down_proj[e]         # (H, H) or (out, in)
-				down_bias_e   = self.down_proj_bias[e]
-				flat = (up_plus_e * glu_e).reshape(B*T, H)
-				down_out_e = F.linear(flat, down_weight_e, down_bias_e).view(B, T, H)
-			else:
-				# shared down_proj
-				flat = (up_plus_e * glu_e).reshape(B*T, H)
-				down_out = F.linear(flat, self.down_proj, self.down_proj_bias).view(B, T, H)
-				down_out_e = down_out  # reuse shared result
-
-			# routing weight: adapt depending on shape of routing_weights
-			# you said routing_weights (num_experts, T) earlier — adapt here:
-			# if routing_weights is (B, E, T) use routing_weights[:, e, :]
-			# if (E, T) use routing_weights[e, :].unsqueeze(0).repeat(B, 1)
-			if routing_weights.dim() == 3:
-				r_e = routing_weights[:, e, :].unsqueeze(-1)  # (B, T, 1)
-			else:
-				r_e = routing_weights[e].unsqueeze(0).unsqueeze(-1)  # (1, T, 1) -> broadcasts over B
-
-			acc += down_out_e * r_e  
-		return	acc
-
-
-	def forward_chunked2(self, hidden_states, routing_weights) -> torch.Tensor:
-		batch_size, T, H = hidden_states.shape
-		hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
+	def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor: #chunked/looped
 		num_experts = routing_weights.shape[1]
-		hidden_states = hidden_states.repeat(num_experts, 1)
-		hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
+		batch_size, T, H = hidden_states.shape
 		acc = torch.zeros((batch_size, T, H), device=hidden_states.device, dtype=hidden_states.dtype)
-
 		for e in range(num_experts):
-			x = hidden_states[e].unsqueeze(0)
 			s_gate_up_proj = self.gate_up_proj[e].unsqueeze(0)
 			s_gate_up_proj_bias = self.gate_up_proj_bias[e].unsqueeze(0)
 			s_down_proj = self.down_proj[e].unsqueeze(0)
 			s_down_proj_bias = self.down_proj_bias[e].unsqueeze(0)
-			routing_weights_e = routing_weights[:, e:e+1]
+			routing_weights_e = routing_weights[:, e].unsqueeze(-1)
 
-			gate_up = torch.bmm(x, s_gate_up_proj) + s_gate_up_proj_bias[..., None, :]
+			gate_up = torch.bmm(hidden_states, s_gate_up_proj) + s_gate_up_proj_bias[..., None, :]
 			gate, up = gate_up[..., ::2], gate_up[..., 1::2]
 			gate = gate.clamp(min=None, max=self.limit)
 			up = up.clamp(min=-self.limit, max=self.limit)
-			glu = gate * torch.sigmoid(gate * self.alpha)			
+			glu = gate * torch.sigmoid(gate * self.alpha)
 			next_states = torch.bmm(((up + 1) * glu), s_down_proj)
 			next_states = next_states + s_down_proj_bias[..., None, :]
 			next_states = next_states.view(1, batch_size, -1, self.hidden_size)
-			next_states = next_states * routing_weights_e.transpose(0, 1).view(1, batch_size, -1)[..., None]			
-			next_states = next_states.sum(dim=0)			
+			next_states = next_states * routing_weights_e.transpose(0, 1).view(1, batch_size, -1)[..., None]
+			next_states = next_states.squeeze(0) #.sum(dim=0)
 			acc += next_states
-			#print(x.shape, s_gate_up_proj.shape, s_gate_up_proj_bias.shape, s_down_proj.shape, "routing_weights:", routing_weights_e.shape, "next_states:", next_states.shape)
-
+			#print(x.shape, s_gate_up_proj.shape, s_gate_up_proj_bias.shape, s_down_proj.shape, "routing_weights:", routing_weights_e.shape, "next_states:", next_states.shape)			
 		return acc
 
 
-	def forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:		
-		return self.forward_chunked2(hidden_states, routing_weights) #meine
-		"""
-		When training is is more efficient to just loop over the experts and compute the output for each expert
-		as otherwise the memory would explode.
-
-		For inference we can sacrifice some memory and compute the output for all experts at once. By repeating the inputs.
-
-		Args:
-			hidden_states (torch.Tensor): (batch_size, seq_len, hidden_size)
-			selected_experts (torch.Tensor): (batch_size * token_num, top_k)
-			routing_weights (torch.Tensor): (batch_size * token_num, num_experts)
-		Returns:
-			torch.Tensor
-		"""
+	def forward_default(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
+		#t1 = self.forward_chunked(hidden_states, routing_weights=routing_weights) #chunked for comparison
+		
 		batch_size = hidden_states.shape[0]
 		hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
 		num_experts = routing_weights.shape[1]
 					
-		hidden_states = hidden_states.repeat(num_experts, 1)
+		hidden_states = hidden_states.repeat(num_experts, 1) #T,C->num_experts,T,C
 		hidden_states = hidden_states.view(num_experts, -1, self.hidden_size)
 
 		gate_up = torch.bmm(hidden_states, self.gate_up_proj) + self.gate_up_proj_bias[..., None, :]
@@ -146,6 +72,7 @@ class MyGptOssExperts(GptOssExperts):
 		next_states = next_states.view(num_experts, batch_size, -1, self.hidden_size)
 		next_states = next_states * routing_weights.transpose(0, 1).view(num_experts, batch_size, -1)[..., None]
 		next_states = next_states.sum(dim=0)
+		#print(t1.flatten()[-5:], next_states.flatten()[-5:], "maxErr:", (t1-next_states).abs().max().item(), "\n")
 		return next_states
 
 
@@ -270,7 +197,7 @@ class MyGptOssModel(GptOssModel):
 		)
 		
 
-#===
+#===============================================
 def my_eager_attention_forward(
 	module: nn.Module,
 	query: torch.Tensor,
@@ -291,7 +218,7 @@ def my_eager_attention_forward(
 	if offset==0: #use FA only for first generation
 		#print("offset", query.shape, key.shape, offset, "n_ctx:", n_ctx, "sliding_window:", sliding_window, "scaling:", scaling, kwargs)
 		start_q = torch.LongTensor([offset]).to(query.device)
-		t = attention(
+		t = flash_attention(
 			query,
 			key_states,
 			value_states,
@@ -300,7 +227,7 @@ def my_eager_attention_forward(
 			sliding_window,
 			start_q
 		)
-		attn_output, attn_weights = t, None		
+		attn_output, attn_weights = t, None
 	
 	else: #standard attention (default)
 		attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
@@ -328,7 +255,7 @@ import transformers.models.gpt_oss.modeling_gpt_oss as modeling
 modeling.GptOssExperts = MyGptOssExperts
 modeling.GptOssAttention = MyGptOssAttention
 modeling.GptOssModel = MyGptOssModel
-modeling.eager_attention_forward = my_eager_attention_forward #testing
+modeling.eager_attention_forward = my_eager_attention_forward
 #===============================================
 
 
