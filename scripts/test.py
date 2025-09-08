@@ -6,11 +6,11 @@ from ollm import gpt_oss, gds_loader, llama
 
 import torch, os
 from datetime import datetime
-from transformers import AutoTokenizer, TextStreamer
+from transformers import AutoTokenizer, TextStreamer, DynamicCache
 
 def inference_chat():
-	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
-	sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./samples/10k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english).", 500
+	sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
+	#sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./samples/2k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english).", 500
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
