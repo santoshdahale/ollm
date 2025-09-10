@@ -3,7 +3,7 @@ import torch
 from transformers import DynamicCache
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
 
-class KVCache(DynamicCache): #2.0
+class KVCache(DynamicCache):
 	def __init__(self, cache_dir="./kv_cache", stats=None):
 		super().__init__()
 		self.cache_folder = os.path.join(cache_dir, "kv_cache")

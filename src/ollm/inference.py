@@ -3,6 +3,7 @@ import torch
 from transformers import AutoTokenizer
 from .utils import Stats, file_get_contents
 from .gds_loader import GDSWeights
+from .kvcache import KVCache
 from . import llama
 from . import gpt_oss
 
@@ -72,36 +73,9 @@ class Inference:
 	def offload_layers_to_cpu(self, **args):
 		self.model.offload_layers_to_cpu(**args)
 
-
-#==============================================================================================
-
-if __name__ == "__main__":
-	device = torch.device("cuda:0")
-	llama.loader = GDSWeights("/home/mega4alik/ssd/gds_export/manifest.json")
-	stats = Stats()
-	if 1==0: #prepare model without layers weights
-		model_id = "meta-llama/Llama-3.2-1B-Instruct"
-		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		tokenizer.pad_token = tokenizer.eos_token
-		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True) #cpu | meta, dtype=should be bfloat16
-		model.clean_layers_weights()
-		model.save_pretrained("./models/llama3-1B") #saving model without layers weights
-		tokenizer.save_pretrained("./models/llama3-1B"); exit()
 	
-	elif 2==2:
-		model_id = "./models/llama3-1B-chat"
-		print("loading model:", model_id)
-		tokenizer = AutoTokenizer.from_pretrained(model_id)
-		model = MyLlamaForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
-		model.clean_layers_weights()
-		model.eval()
-		model.cuda()
-		inference_chat()
-
-
-
-
-
-
-
-
+	def DiskCache(self, cache_dir="./kvcache"):
+		if self.model_id=="gpt-oss-20B":
+			print("gpt-oss-20B DiskCache is not supported at the moment. using default DynamicCache instead")
+		else:
+			return KVCache(cache_dir=cache_dir, stats=self.stats) #config=?

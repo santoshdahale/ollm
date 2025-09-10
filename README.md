@@ -11,10 +11,20 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 ---
+<p dir="auto"><em>Latest updates (0.3.0)</em> 🔥</p>
+<ul dir="auto">
+<li>Llama3 custom chunked attention replaced with flash-attention2 for stability</li>
+<li>gpt-oss-20B flash-attention-like implementation added to reduce VRAM usage </li>
+<li>gpt-oss-20B chunked MLP added to reduce VRAM usage </li>
+<li>KVCache is replaced with DiskCache.</li>
+<li><b>Important!</b> If you are seeing repetitive outputs with Llama3 or gpt-oss models, upgrade to the newest 0.3.0 version by `pip install ollm --upgrade`</li>
+</ul>
+
+---
 
 ## About
 
-oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b)  is also supported (large-context is coming soon). No quantization is used—only fp16/bf16 precision. 
+oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
 
 ###  8GB Nvidia 3060 Ti 100k context inference memory usage:
 
@@ -65,15 +75,16 @@ pip install kvikio-cu{cuda_version} Ex, kvikio-cu12
 Code snippet sample 
 
 ```bash
-from ollm import Inference, KVCache
+from ollm import Inference, file_get_contents, TextStreamer
 o = Inference("llama3-1B-chat", device="cuda:0") #llama3-1B/3B/8B-chat, gpt-oss-20B
 o.ini_model(models_dir="./models/", force_download=False)
-o.offload_layers_to_cpu(layers_num=2) #(optional) offload some layers to CPU for speed increase
-past_key_values = KVCache(cache_dir="./kv_cache/", stats=o.stats) #set None for small context
+o.offload_layers_to_cpu(layers_num=2) #(optional) offload some layers to CPU for speed boost
+past_key_values = o.DiskCache(cache_dir="./kv_cache/") #set None if context is small
+text_streamer = TextStreamer(o.tokenizer, skip_prompt=True, skip_special_tokens=False)
 
 messages = [{"role":"system", "content":"You are helpful AI assistant"}, {"role":"user", "content":"List planets"}]
 input_ids = o.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(o.device)
-outputs = o.model.generate(input_ids=input_ids,  past_key_values=past_key_values, max_new_tokens=20).cpu()
+outputs = o.model.generate(input_ids=input_ids,  past_key_values=past_key_values, max_new_tokens=100, streamer=text_streamer).cpu()
 answer = o.tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
 print(answer)
 ```
@@ -81,4 +92,3 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
-

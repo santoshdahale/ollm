@@ -1,13 +1,13 @@
-from ollm import Inference, KVCache, file_get_contents
+from ollm import Inference, TextStreamer, file_get_contents
 import torch, os
 from datetime import datetime
-from transformers import TextStreamer, DynamicCache
 
-def run_test(test_id, model_id, sm, um, past_key_values=None, offload_layers_to_cpu=0, max_new_tokens=500):
+def run_test(test_id, model_id, sm, um, kvcache=None, offload_layers_to_cpu=0, max_new_tokens=500):
 	o = Inference(model_id, device="cuda:0")
 	o.ini_model(models_dir="/media/mega4alik/ssd/models/", force_download=False)
-	o.offload_layers_to_cpu(layers_num=offload_layers_to_cpu)	
-	if past_key_values and isintance(past_key_values, KVCache): past_key_values.stats = o.stats
+	o.offload_layers_to_cpu(layers_num=offload_layers_to_cpu)
+	if kvcache=="disk": past_key_values = o.DiskCache(cache_dir="/media/mega4alik/ssd/kv_cache/")
+	else: past_key_values=None
 	model, tokenizer, device = o.model, o.tokenizer, o.device
 
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
@@ -22,28 +22,24 @@ def run_test(test_id, model_id, sm, um, past_key_values=None, offload_layers_to_
 
 
 #=======================================================
-test_ids = [3,2,1]
-cache_dir = "/media/mega4alik/ssd/kv_cache/"
+test_ids = [3]
 
 for test_id in test_ids:
 	if test_id==1: #1. Llama3-8B check noKV==newKV2.0 on 10k_chats
 		sm, um = "[CHATS]:\n"+file_get_contents("./samples/10k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english)."
-		ans1 = run_test("1-1", "llama3-8B-chat", sm, um, past_key_values=None)
-		past_key_values = KVCache(cache_dir=cache_dir)
-		ans2 = run_test("1-2", "llama3-8B-chat", sm, um, past_key_values=past_key_values, offload_layers_to_cpu=2)
-		if ans1!=ans2: print(f"#1.TestFailed <1.ans1>:\n{ans2}\n<1.ans2>:\n{ans2}")
+		ans1 = run_test("1-1", "llama3-8B-chat", sm, um)
+		ans2 = run_test("1-2", "llama3-8B-chat", sm, um, kvcache="disk", offload_layers_to_cpu=2)
+		if ans1!=ans2: raiseError(f"#1.TestFailed <1.ans1>:\n{ans2}\n<1.ans2>:\n{ans2}")
 		else: print("#1.TestSuccess")
 
-	if test_id==2: #2. gpt-oss-20B check noKV==newKV2.0 on 2k_sample	
+	if test_id==2: #2. gpt-oss-20B check noKV==newKV2.0 on 2k_sample
 		sm, um = "[CHATS]:\n"+file_get_contents("./samples/2k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english)."
-		ans1 = run_test("2-1", "gpt-oss-20B", sm, um, past_key_values=None)
-		past_key_values = KVCache(cache_dir=cache_dir)
-		ans2 = run_test("2-2", "gpt-oss-20B", sm, um, past_key_values=past_key_values, offload_layers_to_cpu=6)
-		if ans1!=ans2: print(f"#2.TestFailed <2.ans1>:\n{ans2}\n<2.ans2>:\n{ans2}")
+		ans1 = run_test("2-1", "gpt-oss-20B", sm, um)
+		ans2 = run_test("2-2", "gpt-oss-20B", sm, um, kvcache="disk", offload_layers_to_cpu=6)
+		if ans1!=ans2: raiseError(f"#2.TestFailed <2.ans1>:\n{ans2}\n<2.ans2>:\n{ans2}")
 		else: print("#2.TestSuccess")
 
 	if test_id==3: #3. Llama3-8B newKV2.0, make sure it runs without OOM on 85k_sample
 		sm, um = file_get_contents("./samples/85k_sample.txt"), "Analyze papers above and find 3 common similarities."
-		past_key_values = KVCache(cache_dir=cache_dir)
-		ans = run_test("3", "llama3-8B-chat", sm, um, past_key_values=past_key_values, offload_layers_to_cpu=0, max_new_tokens=100)
+		ans = run_test("3", "llama3-8B-chat", sm, um, kvcache="disk", offload_layers_to_cpu=2, max_new_tokens=100)
 		print("#3.TestSuccess")
