@@ -9,7 +9,7 @@ text_streamer = TextStreamer(o.tokenizer, skip_prompt=True, skip_special_tokens=
 sm, um = "You are helpful AI assistant", "List planets starting from Mercury"
 #sm, um = file_get_contents("./samples/85k_sample.txt"), "What's common between these articles?"
 messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
-input_ids = o.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(o.device)
+input_ids = o.tokenizer.apply_chat_template(messages, reasoning_effort="minimal", tokenize=True, add_generation_prompt=True, return_tensors="pt").to(o.device)
 outputs = o.model.generate(input_ids=input_ids,  past_key_values=past_key_values, max_new_tokens=100, streamer=text_streamer).cpu()
 answer = o.tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
 print(answer)

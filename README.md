@@ -83,7 +83,7 @@ past_key_values = o.DiskCache(cache_dir="./kv_cache/") #set None if context is s
 text_streamer = TextStreamer(o.tokenizer, skip_prompt=True, skip_special_tokens=False)
 
 messages = [{"role":"system", "content":"You are helpful AI assistant"}, {"role":"user", "content":"List planets"}]
-input_ids = o.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt").to(o.device)
+input_ids = o.tokenizer.apply_chat_template(messages, reasoning_effort="minimal", tokenize=True, add_generation_prompt=True, return_tensors="pt").to(o.device)
 outputs = o.model.generate(input_ids=input_ids,  past_key_values=past_key_values, max_new_tokens=100, streamer=text_streamer).cpu()
 answer = o.tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
 print(answer)
