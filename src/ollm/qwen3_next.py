@@ -8,43 +8,42 @@ from torch import nn
 import torch.nn.functional as F
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, file_get_contents
-from safetensors import safe_open
 
 #global vars
 loader, stats = None, None
 
-#======== rewriting core classess ==============
+#======== rewriting core classes ==============
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, create_causal_mask, repeat_kv, MoeModelOutputWithPast, TransformersKwargs, Cache
 
-class weightsLoader:
+class loaderLayer:
 	def _load_layer_weights(self):
 		t1 = time.perf_counter()
 		base = f"model.layers.{self.layer_idx}."
-		d = torch.load(loader.path+base.replace(".","__")+".pt", map_location="cuda:0") #self_attn.weight=tensor
+		loader.preload_layer_safetensors(base)
+		d = loader.load_dict_to_cuda(base)
 		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_assign_tensor_to_module(parent, leaf, tensor)
 		if stats: stats.set("layer_load", t1)
 			
-	def _unload_layer_weights1(self):
+	def _unload_layer_weights(self):
 		base = f"model.layers.{self.layer_idx}."
-		for attr_path in loader.manifest[base]:		
+		for attr_path in loader.manifest[base]:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 	
-	def _unload_layer_weights(self):
+	def _unload_layer_weights_full(self):
 		base = f"model.layers.{self.layer_idx}."
-		for manifest_name, attr_paths in loader.manifest.items():
-			if manifest_name.startswith(base):
-				for attr_path in attr_paths:
-					attr_path2 = manifest_name.replace(base, "")+attr_path #mlp.experts.x. + down_proj
-					parent, leaf = _walk_to_parent(self, attr_path2)
+		for base1 in list(loader.manifest.keys()):
+			if base1.startswith(base):
+				for attr_path, filename in loader.manifest[base1].items():
+					parent, leaf = _walk_to_parent(self, base1[len(base):]+attr_path)
 					_set_meta_placeholder(parent, leaf)
 
 	def _load_expert_weights(self):
 		t1 = time.perf_counter()
 		base = f"model.layers.{self.layer_idx}.mlp.experts.{self.expert_idx}."
-		d = torch.load(loader.path+base.replace(".","__")+".pt", map_location="cuda:0")
+		d = loader.load_dict_to_cuda(base)
 		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_assign_tensor_to_module(parent, leaf, tensor)
@@ -57,7 +56,7 @@ class weightsLoader:
 			_set_meta_placeholder(parent, leaf)
 
 
-class MyQwen3NextMLP(Qwen3NextMLP, weightsLoader):
+class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 	def forward(self, x):
 		if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
@@ -65,7 +64,7 @@ class MyQwen3NextMLP(Qwen3NextMLP, weightsLoader):
 		return out
 		
 
-class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, weightsLoader):
+class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, loaderLayer):
 	def __init__(self, config, layer_idx):
 		super().__init__(config, layer_idx)
 		self.layer_idx = layer_idx
@@ -91,7 +90,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 		self.layers = nn.ModuleList()
 		for layer_idx in range(config.num_hidden_layers):
 			self.layers.append(MyQwen3NextDecoderLayer(config, layer_idx))
-			self.layers[-1]._unload_layer_weights()
+			self.layers[-1]._unload_layer_weights_full()
 				
 	def forward(
 		self,
@@ -172,7 +171,6 @@ modeling.Qwen3NextModel = MyQwen3NextModel
 class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
-		self.model.parent_lm_head = self.lm_head #link
 		self.num_hidden_layers = config.num_hidden_layers
 
 	def generate(self, **args):
@@ -180,6 +178,20 @@ class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 			return super().generate(**args)
 
 	def offload_layers_to_cpu(self, layers_num=2):
-		print("./gwen3_next offloading layers to CPU NOT supported.")
+		self.offload_layers_to_gpu_cpu(cpu_layers_num=layers_num)
 
-
+	def offload_layers_to_gpu_cpu(self, gpu_layers_num=0, cpu_layers_num=0):
+		print("offloading layers to CPU/GPU...")
+		layer_idx = 0
+		while (gpu_layers_num>0 or cpu_layers_num>0) and layer_idx < self.num_hidden_layers:
+			base = f"model.layers.{layer_idx}."
+			loader.preload_layer_safetensors(base)
+			if gpu_layers_num>0:
+				loader.offload_dict_to_gpu_cpu(base, gpu=True)
+				gpu_layers_num-=1
+			else:
+				loader.offload_dict_to_gpu_cpu(base, gpu=False)
+				cpu_layers_num-=1				
+			layer_idx+=1
+		import gc; gc.collect()
+		print("finished offloading layers to CPU/GPU")

@@ -2,10 +2,11 @@ from ollm import Inference, TextStreamer, file_get_contents
 import torch, os
 from datetime import datetime
 
-def run_test(test_id, model_id, sm, um, kvcache=None, offload_layers_to_cpu=0, max_new_tokens=500):
+def run_test(test_id, model_id, sm, um, kvcache=None, offload_layers_to_gpu=0, offload_layers_to_cpu=0, max_new_tokens=500):
 	o = Inference(model_id, device="cuda:0")
-	o.ini_model(models_dir="/media/mega4alik/ssd/models/", force_download=False)
-	o.offload_layers_to_cpu(layers_num=offload_layers_to_cpu)
+	o.ini_model(models_dir="/media/mega4alik/ssd2/models/", force_download=False)
+	if offload_layers_to_gpu: o.offload_layers_to_gpu_cpu(gpu_layers_num=offload_layers_to_gpu, cpu_layers_num=offload_layers_to_cpu)
+	elif offload_layers_to_cpu>0: o.offload_layers_to_cpu(layers_num=offload_layers_to_cpu)
 	if kvcache=="disk": past_key_values = o.DiskCache(cache_dir="/media/mega4alik/ssd/kv_cache/")
 	else: past_key_values=None
 	model, tokenizer, device = o.model, o.tokenizer, o.device
@@ -22,7 +23,7 @@ def run_test(test_id, model_id, sm, um, kvcache=None, offload_layers_to_cpu=0, m
 
 
 #=======================================================
-test_ids = [3]
+test_ids = [4]
 
 for test_id in test_ids:
 	if test_id==1: #1. Llama3-8B check noKV==newKV2.0 on 10k_chats
@@ -43,3 +44,8 @@ for test_id in test_ids:
 		sm, um = file_get_contents("./samples/85k_sample.txt"), "Analyze papers above and find 3 common similarities."
 		ans = run_test("3", "llama3-8B-chat", sm, um, kvcache="disk", offload_layers_to_cpu=2, max_new_tokens=100)
 		print("#3.TestSuccess")
+
+	if test_id==4: #4. qwen3-next-80B, make sure it generates proper output on 10k sample
+		sm, um = "[CHATS]:\n"+file_get_contents("./samples/10k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions."
+		ans = run_test("4", "qwen3-next-80B", sm, um, kvcache="disk", offload_layers_to_cpu=0)
+		print("#4.TestSuccess")
