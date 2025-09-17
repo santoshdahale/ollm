@@ -25,7 +25,7 @@ def inference_chat():
 #=======================================================
 if 1==1:
 	device = torch.device("cuda:0")
-	model_dir = "/home/mega4alik/Desktop/models/qwen3_next/"  #"/media/mega4alik/ssd/models/gpt-oss-20B/"
+	model_dir ="/media/mega4alik/ssd2/models/qwen3_next/"  #"/media/mega4alik/ssd/models/gpt-oss-20B/"
 	print("loading", model_dir)
 	#qwen3next.loader = GDSWeights(model_dir+"gds_export/", device="cuda:0")
 	stats = Stats()
