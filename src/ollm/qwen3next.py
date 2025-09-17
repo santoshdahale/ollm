@@ -7,9 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
-from transformers import AutoTokenizer, AutoModelForCausalLM
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, file_get_contents
-from .gds_loader import GDSWeights
 from safetensors import safe_open
 
 #global vars
@@ -18,109 +16,56 @@ loader, stats = None, None
 #======== rewriting core classess ==============
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, create_causal_mask, repeat_kv, MoeModelOutputWithPast, TransformersKwargs, Cache
 
-class gdsLoader1:
-	def _get_my_manifests(self):
-		self.path = "/media/mega4alik/ssd2/models/qwen3_next/"
-		self.map = json.loads(file_get_contents(f"{self.path}model.safetensors.index.json"))
-		base, a = f"model.layers.{self.layer_idx}.", []
-		for manifest_name, filename in self.map["weight_map"].items():
-			if manifest_name.startswith(base):
-				attr_path = manifest_name.replace(base, "")
-				a.append((manifest_name, attr_path, filename))
-		return a
-
+class weightsLoader:
 	def _load_layer_weights(self):
 		t1 = time.perf_counter()
-		for manifest_name, attr_path, filename in self._get_my_manifests():
-			if ".mlp.experts." in manifest_name: continue #skip experts. we load them later
-			with safe_open(self.path+filename, framework="pt", device="cpu") as f:
-				tensor = f.get_tensor(manifest_name).to("cuda:0")
+		base = f"model.layers.{self.layer_idx}."
+		d = torch.load(loader.path+base.replace(".","__")+".pt", map_location="cuda:0") #self_attn.weight=tensor
+		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_assign_tensor_to_module(parent, leaf, tensor)
 		if stats: stats.set("layer_load", t1)
 			
-	def _unload_layer_weights(self):
-		for manifest_name, attr_path, filename in self._get_my_manifests():
-			parent, leaf = _walk_to_parent(self, attr_path)
-			_set_meta_placeholder(parent, leaf)
-
-	def _load_expert_weights(self, expert_idx):
-		t1 = time.perf_counter()
-		base, a = f"model.layers.{self.layer_idx}.mlp.experts.{expert_idx}.", []
-		for manifest_name, attr_path, filename in self._get_my_manifests():
-			if not manifest_name.startswith(base): continue
-			attr_path = manifest_name.replace(base, "")
-			with safe_open(self.path+filename, framework="pt", device="cpu") as f:
-				tensor = f.get_tensor(manifest_name).to("cuda:0")
-			parent, leaf = _walk_to_parent(self, attr_path)
-			_assign_tensor_to_module(parent, leaf, tensor)
-		if stats: stats.set("expert_load", t1)
-
-
-class LayerLoader:
-	def get_manifest(self):
-		self.path = "/home/mega4alik/Desktop/models/qwen3_next/gds_export/"
-		if not hasattr(self, "map"):
-			self.map = json.loads(file_get_contents(f"{self.path}manifest.json"))
-		return self.map
-
-	def _load_layer_weights(self):
-		t1 = time.perf_counter()
-		base = f"model.layers.{self.layer_idx}."
-		d = torch.load(self.path+base.replace(".","__")+".pt") #self_attn.weight=tensor
-		for attr_path, tensor in d.items():
-			parent, leaf = _walk_to_parent(self, attr_path)
-			_assign_tensor_to_module(parent, leaf, tensor.to("cuda:0"))
-		if stats: stats.set("layer2_load", t1)
-			
 	def _unload_layer_weights1(self):
 		base = f"model.layers.{self.layer_idx}."
-		for attr_path in self.get_manifest()[base]:		
+		for attr_path in loader.manifest[base]:		
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 	
 	def _unload_layer_weights(self):
 		base = f"model.layers.{self.layer_idx}."
-		for manifest_name, attr_paths in self.get_manifest().items():
+		for manifest_name, attr_paths in loader.manifest.items():
 			if manifest_name.startswith(base):
 				for attr_path in attr_paths:
 					attr_path2 = manifest_name.replace(base, "")+attr_path #mlp.experts.x. + down_proj
 					parent, leaf = _walk_to_parent(self, attr_path2)
-					_set_meta_placeholder(parent, leaf)					
+					_set_meta_placeholder(parent, leaf)
 
 	def _load_expert_weights(self):
-		self.get_manifest()
 		t1 = time.perf_counter()
 		base = f"model.layers.{self.layer_idx}.mlp.experts.{self.expert_idx}."
-		d = torch.load(self.path+base.replace(".","__")+".pt")
+		d = torch.load(loader.path+base.replace(".","__")+".pt", map_location="cuda:0")
 		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)
-			_assign_tensor_to_module(parent, leaf, tensor.to("cuda:0"))
-		if stats: stats.set("expert2_load", t1)
+			_assign_tensor_to_module(parent, leaf, tensor)
+		if stats: stats.set("experts_load", t1)
 
 	def _unload_expert_weights(self):
 		base = f"model.layers.{self.layer_idx}.mlp.experts.{self.expert_idx}."
-		for attr_path in self.get_manifest()[base]:
+		for attr_path in loader.manifest[base]:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 
 
-class MyQwen3NextMLP(Qwen3NextMLP, LayerLoader):
+class MyQwen3NextMLP(Qwen3NextMLP, weightsLoader):
 	def forward(self, x):
-		if hasattr(self, "expert_idx"):
-			#print(self.expert_idx, "loading mlp.experts.\n")
-			self._load_expert_weights()
+		if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
-		#if hasattr(self, "expert_idx"): self._unload_expert_weights()
+		if hasattr(self, "expert_idx"): self._unload_expert_weights()
 		return out
 		
 
-class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock):
-	def __init__(self, config):
-		super().__init__(config)
-
-
-class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, LayerLoader):
+class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, weightsLoader):
 	def __init__(self, config, layer_idx):
 		super().__init__(config, layer_idx)
 		self.layer_idx = layer_idx
@@ -193,7 +138,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 
 		#===============================================
 		for decoder_layer in self.layers:
-			print(decoder_layer.layer_idx, "decoder_layer /", self.config.num_hidden_layers, stats.print_and_clean())
+			#print(decoder_layer.layer_idx, "decoder_layer /", self.config.num_hidden_layers, stats.print_and_clean())
 			layer_mask = linear_attn_mask if decoder_layer.layer_type == "linear_attention" else causal_mask
 			hidden_states = decoder_layer(
 				hidden_states,
@@ -219,7 +164,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 
 import transformers.models.qwen3_next.modeling_qwen3_next as modeling
 modeling.Qwen3NextMLP = MyQwen3NextMLP
-modeling.Qwen3NextSparseMoeBlock = MyQwen3NextSparseMoeBlock
+#modeling.Qwen3NextSparseMoeBlock = MyQwen3NextSparseMoeBlock
 modeling.Qwen3NextModel = MyQwen3NextModel
 #===============================================
 
