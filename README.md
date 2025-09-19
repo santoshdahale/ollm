@@ -1,8 +1,8 @@
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://ollm.s3.us-east-1.amazonaws.com/files/logo.png">
-    <img alt="vLLM" src="https://ollm.s3.us-east-1.amazonaws.com/files/logo.png" width=52%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://ollm.s3.us-east-1.amazonaws.com/files/logo2.png">
+    <img alt="vLLM" src="https://ollm.s3.us-east-1.amazonaws.com/files/logo2.png" width=52%>
   </picture>
 </p>
 
@@ -91,3 +91,5 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
+
+
