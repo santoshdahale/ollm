@@ -1,8 +1,10 @@
-import json, os, time, math
+import json, os, time, math, re
 import torch
 from torch.utils.dlpack import from_dlpack
 import cupy as cp
 import kvikio
+#from safetensors import safe_open
+from safetensors._safetensors_rust import safe_open
 
 stats = None
 
@@ -22,7 +24,7 @@ class GDSWeights:
 		with open(manifest_path) as f:
 			self.manifest = json.load(f)
 		self.device = torch.device(device)
-		self.offloaded_cpu = {}
+		self.offloaded_map = {}
 
 	def load_param_to_cuda(self, name: str) -> torch.Tensor:
 		meta = self.manifest[name]
@@ -80,11 +82,11 @@ class GDSWeights:
 			tensor = torch.load(path, map_location="cpu")
 		else: #kvikio, numpy
 			tensor = self.load_from_disk_to_cuda(path, shape, dtype).cpu() #should be without GPU
-		self.offloaded_cpu[name] = {"shape":shape, "dtype":dtype, "packed":packed, "tensor":tensor}
+		self.offloaded_map[name] = {"shape":shape, "dtype":dtype, "packed":packed, "tensor":tensor}
 
 	def get_offloaded_from_cpu_to_cuda(self, name):
-		if name in self.offloaded_cpu:
-			meta = self.offloaded_cpu[name]
+		if name in self.offloaded_map:
+			meta = self.offloaded_map[name]
 			t, packed = meta["tensor"], meta["packed"]
 			t1 = time.perf_counter()
 			if packed=="mxfp4":
@@ -94,7 +96,6 @@ class GDSWeights:
 			if stats: stats.set("offloaded_cpu_to_cuda", t1)
 			return tensor
 		return None
-
 
 #=========================================================================
 
@@ -168,6 +169,63 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 	out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
 	del blocks, scales, lut
 	return out.transpose(1, 2).contiguous()
+
+
+#=========================================================================
+
+class MoEWeightsLoader(): #qwen3_next
+	def __init__(self, path: str, device="cuda:0"):
+		self.path = path #<model_dir>
+		index_path = os.path.join(path, 'model.safetensors.index.json')
+		with open(index_path) as f: indexes = json.load(f)
+		self.manifest, self.safetensors = {}, {}
+		for manifest_name, filename in indexes["weight_map"].items():
+			match1 = re.search(r"(model\.layers\.\d+\.mlp\.experts\.\d+\.)", manifest_name)
+			match2 = re.search(r"(model\.layers\.\d+\.)", manifest_name)
+			if match1 or match2:
+				base = match1.group(1) if match1 else match2.group(1)
+				if base not in self.manifest: self.manifest[base] = {}
+				attr_path = manifest_name.replace(base, "")
+				self.manifest[base][attr_path] = filename
+
+		self.device = torch.device(device)
+		self.offloaded_map = {}
+
+	def load_dict_to_cuda(self, base):
+		t = self.get_offloaded_dict_to_cuda(base)
+		if t: return t
+		return self.load_dict_from_disk(base, device=self.device)
+
+	def offload_dict_to_gpu_cpu(self, base, gpu=False):
+		d = self.load_dict_from_disk(base, device=self.device if gpu else 'cpu')
+		self.offloaded_map[base] = d
+
+	def get_offloaded_dict_to_cuda(self, base):
+		if base in self.offloaded_map:
+			d, d2 = self.offloaded_map[base], {}
+			for attr_path, tensor in d.items():
+				d2[attr_path] = tensor.to(self.device)
+			return d2
+		return None
+	
+	def load_dict_from_disk1(self, base, device='cpu'): #legacy base.pt(attr=>tensor)
+		return torch.load(self.path+base.replace(".","__")+".pt", map_location=device) #{self_attn.weight=tensor}
+
+	def load_dict_from_disk(self, base, device='cpu'): #original safetensors
+		dbase, d = self.manifest[base], {}
+		for attr_path, filename in dbase.items():
+			d[attr_path] = self.safetensors[filename].get_tensor(base+attr_path).to(device)
+		return d
+
+	def preload_layer_safetensors(self, base): #load only couple instead of 48
+		del self.safetensors
+		self.safetensors = {}
+		for base1 in list(self.manifest.keys()):
+			if base1.startswith(base):
+				for attr_path, filename in self.manifest[base1].items():
+					if filename not in self.safetensors:
+						self.safetensors[filename] = safe_open(os.path.join(self.path, filename), framework="pt") #KvikIOLoader
+
 
 #=========================================================================
 
