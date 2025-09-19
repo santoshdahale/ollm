@@ -26,13 +26,13 @@ class loaderLayer:
 			_assign_tensor_to_module(parent, leaf, tensor)
 		if stats: stats.set("layer_load", t1)
 			
-	def _unload_layer_weights(self):
+	def _unload_layer_weights1(self):
 		base = f"model.layers.{self.layer_idx}."
 		for attr_path in loader.manifest[base]:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 	
-	def _unload_layer_weights_full(self):
+	def _unload_layer_weights(self):
 		base = f"model.layers.{self.layer_idx}."
 		for base1 in list(loader.manifest.keys()):
 			if base1.startswith(base):
@@ -60,7 +60,7 @@ class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 	def forward(self, x):
 		if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
-		if hasattr(self, "expert_idx"): self._unload_expert_weights()
+		#if hasattr(self, "expert_idx"): self._unload_expert_weights()
 		return out
 		
 
@@ -90,7 +90,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 		self.layers = nn.ModuleList()
 		for layer_idx in range(config.num_hidden_layers):
 			self.layers.append(MyQwen3NextDecoderLayer(config, layer_idx))
-			self.layers[-1]._unload_layer_weights_full()
+			self.layers[-1]._unload_layer_weights()
 				
 	def forward(
 		self,
