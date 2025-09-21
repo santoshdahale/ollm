@@ -13,7 +13,7 @@ from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placehol
 loader, stats = None, None
 
 #======== rewriting core classes ==============
-from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, create_causal_mask, repeat_kv, MoeModelOutputWithPast, TransformersKwargs, Cache
+from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, Qwen3NextRMSNorm, create_causal_mask, repeat_kv, MoeModelOutputWithPast, MoeCausalLMOutputWithPast, TransformersKwargs, Cache
 
 class loaderLayer:
 	def _load_layer_weights(self):
@@ -195,3 +195,63 @@ class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 			layer_idx+=1
 		import gc; gc.collect()
 		print("finished offloading layers to CPU/GPU")
+
+
+#=============================================================================================
+class Qwen3NextMultiTokenPredictor(nn.Module):
+	def __init__(self, config):
+		super().__init__()
+		self.fc = nn.Linear(config.hidden_size*2, config.hidden_size, bias=False)
+		self.norm = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+		self.pre_fc_norm_embedding = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+		self.pre_fc_norm_hidden = Qwen3NextRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+		self.layers = nn.ModuleList([Qwen3NextDecoderLayer(config, layer_idx) for layer_idx in range(1)])
+
+	def forward(self, x, inputs_embeds, position_ids, position_embeddings):
+		inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+		hidden_states = self.pre_fc_norm_hidden(x)
+		hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+		hidden_states = self.fc(hidden_states)
+		
+		hidden_states = self.layers[0](
+			hidden_states,
+			position_embeddings=position_embeddings,
+			position_ids=position_ids
+		)
+		hidden_states = self.norm(hidden_states)		
+
+		return MoeModelOutputWithPast(
+			last_hidden_state=hidden_states,
+			past_key_values=None #past_key_values,
+		)
+
+
+class MyQwen3NextForCausalLM_MTP(MyQwen3NextForCausalLM):
+	def __init__(self, config):
+		super().__init__(config)
+		self.mtp = Qwen3NextMultiTokenPredictor(config)
+	
+	def forward(self, **args):
+		outputs = self.model(**args)
+		hidden_states, past_key_values = outputs.last_hidden_state, outputs.past_key_values
+		logits_list = []
+		logits = self.lm_head(hidden_states[:, -1:, :])		
+		logits_list.append(logits)
+		
+		#MTP
+		#print(args, "--args")
+		position_ids = args["cache_position"].unsqueeze(0)
+		position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
+		inputs_embeds = self.model.embed_tokens(args["input_ids"]) #double computation, can be taken from main model
+		outputs = self.mtp(hidden_states, inputs_embeds, position_ids, position_embeddings)
+		hidden_states = outputs.last_hidden_state
+		logits = self.lm_head(hidden_states[:, -1:, :])
+		logits_list.append(logits)
+
+		logits = torch.cat(logits_list, dim=-2)
+		return MoeCausalLMOutputWithPast(
+			logits=logits,
+			past_key_values=past_key_values
+		)
+
+		
