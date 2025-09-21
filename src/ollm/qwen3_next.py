@@ -230,28 +230,27 @@ class MyQwen3NextForCausalLM_MTP(MyQwen3NextForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
 		self.mtp = Qwen3NextMultiTokenPredictor(config)
+		self.logits2 = None
+		self.past_key_values = None
 	
-	def forward(self, **args):
-		outputs = self.model(**args)
-		hidden_states, past_key_values = outputs.last_hidden_state, outputs.past_key_values
-		logits_list = []
-		logits = self.lm_head(hidden_states[:, -1:, :])		
-		logits_list.append(logits)
-		
-		#MTP
-		#print(args, "--args")
-		position_ids = args["cache_position"].unsqueeze(0)
-		position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
-		inputs_embeds = self.model.embed_tokens(args["input_ids"]) #double computation, can be taken from main model
-		outputs = self.mtp(hidden_states, inputs_embeds, position_ids, position_embeddings)
-		hidden_states = outputs.last_hidden_state
-		logits = self.lm_head(hidden_states[:, -1:, :])
-		logits_list.append(logits)
+	def forward(self, **args):		
+		if not self.logits2:
+			outputs = self.model(**args)
+			hidden_states, past_key_values = outputs.last_hidden_state, outputs.past_key_values						
+			logits = self.lm_head(hidden_states[:, -1:, :])
+			self.past_key_values = past_key_values
 
-		logits = torch.cat(logits_list, dim=-2)
+			position_ids = args["cache_position"].unsqueeze(0)
+			position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
+			inputs_embeds = self.model.embed_tokens(args["input_ids"]) #double computation, can be taken from main model
+			outputs = self.mtp(hidden_states, inputs_embeds, position_ids, position_embeddings)
+			hidden_states = outputs.last_hidden_state
+			self.logits2 = self.lm_head(hidden_states[:, -1:, :])
+		else:
+			logits, past_key_values = self.logits2, self.past_key_values
+			self.logits2, self.past_key_values = None, None
+
 		return MoeCausalLMOutputWithPast(
 			logits=logits,
 			past_key_values=past_key_values
 		)
-
-		
