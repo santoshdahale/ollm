@@ -55,73 +55,115 @@ class loaderLayer:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 
-	def _load_experts_weights2(self, experts_idx): #temp testing -- REMOVE
-		t1 = time.perf_counter()		
+	def _load_experts_weights(self, experts_idx):
 		for expert_idx in experts_idx:
-			base = f"model.layers.{self.layer_idx}.mlp.experts.{expert_idx}."
-			d = loader.load_dict_to_cuda(base)
-			for attr_path, tensor in d.items():
-				parent, leaf = _walk_to_parent(self.experts[expert_idx], attr_path)
-				_assign_tensor_to_module(parent, leaf, tensor)
-		if stats: stats.set("experts2_load", t1)
+			self.experts[expert_idx]._load_expert_weights()
 
 
 class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 	def forward(self, x):
-		if hasattr(self, "expert_idx"): self._load_expert_weights()
+		#if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
 		if hasattr(self, "expert_idx"): self._unload_expert_weights()
 		return out
 		
 
 class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:        
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
-        # router_logits: (batch * sequence_length, n_experts)
-        router_logits = self.gate(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        if self.norm_topk_prob:
-            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # we cast back to the input dtype
-        routing_weights = routing_weights.to(hidden_states.dtype)
+	def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+		batch_size, sequence_length, hidden_dim = hidden_states.shape
+		hidden_states = hidden_states.view(-1, hidden_dim)
+		# router_logits: (batch * sequence_length, n_experts)
+		router_logits = self.gate(hidden_states)
 
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-        )
+		routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+		routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+		if self.norm_topk_prob:
+			routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+		# we cast back to the input dtype
+		routing_weights = routing_weights.to(hidden_states.dtype)
 
-        # One hot encode the selected experts to create an expert mask
-        # this will be used to easily index which expert is going to be sollicitated
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+		final_hidden_states = torch.zeros(
+			(batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+		)
 
-        # Loop over all available experts in the model and perform the computation on each expert
-        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+		# One hot encode the selected experts to create an expert mask
+		# this will be used to easily index which expert is going to be sollicitated
+		expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
-        #self._load_experts_weights(expert_hit.cpu().squeeze().tolist()) #meine
+		# Loop over all available experts in the model and perform the computation on each expert
+		expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()[:20]
+		self._load_experts_weights(expert_hit.cpu().squeeze().tolist()) #meine
+		
+		#=========
+		"""
+		for expert_idx in expert_hit:
+			expert_layer = self.experts[expert_idx]
+			idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
+			current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+			current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+			final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))	
+		"""
 
-        for expert_idx in expert_hit:
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
+		# assume experts all share dimensions:
+		# in_dim -> hidden_dim -> out_dim
+		token_pos_list, expert_id_list, local_rank_list = [], [], []
 
-            # Index the correct hidden states and compute the expert hidden state for
-            # the current expert. We need to make sure to multiply the output hidden
-            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+		for expert_idx in expert_hit:
+			tok_pos, local_rank = torch.where(expert_mask[expert_idx].squeeze(0))
+			if tok_pos.numel() == 0: continue
+			if local_rank.numel() > 0: assert local_rank.max() < hidden_states.size(0), (f"Index {local_rank.max().item()} >= hidden_states.size(0)={hidden_states.size(0)}")
+			assert tok_pos.max() < routing_weights.size(1), (f"Index {tok_pos.max().item()} >= routing_weights.size(1)={routing_weights.size(1)}")
 
-            # However `index_add_` only support torch tensors for indexing so we'll use
-            # the `top_x` tensor here.
-            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+			token_pos_list.append(tok_pos)
+			expert_id_list.append(torch.full_like(tok_pos, int(expert_idx)))
+			local_rank_list.append(local_rank)
+		
+		token_pos = torch.cat(token_pos_list)      # (M,)
+		expert_ids = torch.cat(expert_id_list)     # (M,)
+		local_rank = torch.cat(local_rank_list)    # (M,)
 
-        shared_expert_output = self.shared_expert(hidden_states)
-        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+		x = hidden_states[token_pos]               # (M, in_dim)
+		M, in_dim = x.shape
+		device, dtype = x.device, x.dtype
 
-        final_hidden_states = final_hidden_states + shared_expert_output
+		# ---- Gather expert params as stacked tensors ----
+		def stack_params(attr):
+			return torch.stack([getattr(self.experts[eid], attr).weight for eid in expert_ids], dim=0)
 
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
+		W_gate = stack_params("gate_proj")     # (E, hidden, in), (E, hidden)
+		W_up   = stack_params("up_proj")       # (E, hidden, in), (E, hidden)
+		W_down = stack_params("down_proj")     # (E, out, hidden), (E, out)
+
+		# ---- Layer by layer ----
+		x_un = x.unsqueeze(-1)                                # (M, in, 1)
+		
+		# gate_proj
+		h1 = torch.bmm(W_gate, x_un).squeeze(-1)     # (M, hidden)
+		# up_proj
+		h2 = torch.bmm(W_up,   x_un).squeeze(-1)     # (M, hidden)
+
+		# elementwise gated activation
+		h = self.experts[expert_ids[0]].act_fn(h1) * h2 # (M, hidden)
+
+		# down_proj
+		h_un = h.unsqueeze(-1)                       # (M, hidden, 1)
+		out = torch.bmm(W_down, h_un).squeeze(-1)    # (M, out)
+
+		# routing weights
+		rw = routing_weights[token_pos, local_rank].unsqueeze(-1).to(out.dtype)
+		out = out * rw
+
+		# scatter back
+		final_hidden_states.index_add_(0, token_pos.to(final_hidden_states.device), out.to(final_hidden_states.dtype))
+		print(expert_hit.shape, "x:", x.shape, x_un.shape, "W_gate:", W_gate.shape, "W_up:", W_up.shape, out, out.shape)
+		#==============================================
+
+		shared_expert_output = self.shared_expert(hidden_states)
+		shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+		final_hidden_states = final_hidden_states + shared_expert_output
+		final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+		return final_hidden_states, router_logits
 
 
 
@@ -306,8 +348,7 @@ class MyQwen3NextForCausalLM_MTP(MyQwen3NextForCausalLM):
 			self.past_key_values = past_key_values
 
 			#MTP
-			position_ids = args["cache_position"].unsqueeze(0)
-			print(args, args["input_ids"].shape, "-- input_ids. position_ids:", position_ids)
+			position_ids = args["cache_position"].unsqueeze(0)			
 			position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
 			inputs_embeds = self.model.embed_tokens(args["input_ids"]) #double computation, can be taken from main model
 			outputs = self.mtp(hidden_states, inputs_embeds, position_ids, position_embeddings)
