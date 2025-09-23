@@ -28,11 +28,11 @@ if 1==1:
 	device = torch.device("cuda:0")
 	model_dir ="/media/mega4alik/ssd2/models/qwen3-next-80B/"  #"/media/mega4alik/ssd/models/gpt-oss-20B/"
 	print("loading", model_dir)
-	qwen3_next.loader = MoEWeightsLoader(model_dir, device="cuda:0")
+	qwen3_next.loader = MoEWeightsLoader(model_dir+"gds_export/", device="cuda:0")
 	stats = Stats()
 	qwen3_next.stats, gds_loader.stats = stats, stats
 	tokenizer = AutoTokenizer.from_pretrained(model_dir)
-	model = qwen3_next.MyQwen3NextForCausalLM_MTP.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True, attn_implementation="flash_attention_2")
+	model = qwen3_next.MyQwen3NextForCausalLM_MTP.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", use_cache=True, low_cpu_mem_usage=True, ignore_mismatched_sizes=True, attn_implementation="flash_attention_2")
 	#model.clean_layers_weights()
 	model.eval()
 	model.to(device)

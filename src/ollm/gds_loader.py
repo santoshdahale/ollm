@@ -3,8 +3,7 @@ import torch
 from torch.utils.dlpack import from_dlpack
 import cupy as cp
 import kvikio
-#from safetensors import safe_open
-from safetensors._safetensors_rust import safe_open
+from safetensors.torch import safe_open, load_file
 
 stats = None
 
@@ -173,8 +172,8 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 
 #=========================================================================
 
-class MoEWeightsLoader(): #qwen3_next
-	def __init__(self, path: str, device="cuda:0"):
+class MoEWeightsLoader(GDSWeights): #qwen3_next
+	def __init2__(self, path: str, device="cuda:0"):
 		self.path = path #<model_dir>
 		index_path = os.path.join(path, 'model.safetensors.index.json')
 		with open(index_path) as f: indexes = json.load(f)
@@ -208,10 +207,10 @@ class MoEWeightsLoader(): #qwen3_next
 			return d2
 		return None
 	
-	def load_dict_from_disk1(self, base, device='cpu'): #legacy base.pt(attr=>tensor)
+	def load_dict_from_disk(self, base, device='cpu'): #legacy base.pt(attr=>tensor)
 		return torch.load(self.path+base.replace(".","__")+".pt", map_location=device) #{self_attn.weight=tensor}
-
-	def load_dict_from_disk(self, base, device='cpu'): #original safetensors
+		
+	def load_dict_from_disk2(self, base, device='cpu'): #original safetensors
 		dbase, d = self.manifest[base], {}
 		for attr_path, filename in dbase.items():
 			d[attr_path] = self.safetensors[filename].get_tensor(base+attr_path).to(device)

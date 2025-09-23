@@ -19,20 +19,20 @@ class loaderLayer:
 	def _load_layer_weights(self):
 		t1 = time.perf_counter()
 		base = f"model.layers.{self.layer_idx}."
-		loader.preload_layer_safetensors(base)
+		#loader.preload_layer_safetensors(base)
 		d = loader.load_dict_to_cuda(base)
 		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_assign_tensor_to_module(parent, leaf, tensor)
 		if stats: stats.set("layer_load", t1)
 			
-	def _unload_layer_weights1(self):
+	def _unload_layer_weights(self): #v1 with separate files for each base
 		base = f"model.layers.{self.layer_idx}."
 		for attr_path in loader.manifest[base]:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 	
-	def _unload_layer_weights(self):
+	def _unload_layer_weights2(self):
 		base = f"model.layers.{self.layer_idx}."
 		for base1 in list(loader.manifest.keys()):
 			if base1.startswith(base):
@@ -55,14 +55,75 @@ class loaderLayer:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
 
+	def _load_experts_weights2(self, experts_idx): #temp testing -- REMOVE
+		t1 = time.perf_counter()		
+		for expert_idx in experts_idx:
+			base = f"model.layers.{self.layer_idx}.mlp.experts.{expert_idx}."
+			d = loader.load_dict_to_cuda(base)
+			for attr_path, tensor in d.items():
+				parent, leaf = _walk_to_parent(self.experts[expert_idx], attr_path)
+				_assign_tensor_to_module(parent, leaf, tensor)
+		if stats: stats.set("experts2_load", t1)
+
 
 class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 	def forward(self, x):
 		if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
-		#if hasattr(self, "expert_idx"): self._unload_expert_weights()
+		if hasattr(self, "expert_idx"): self._unload_expert_weights()
 		return out
 		
+
+class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:        
+        batch_size, sequence_length, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        # router_logits: (batch * sequence_length, n_experts)
+        router_logits = self.gate(hidden_states)
+
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        if self.norm_topk_prob:
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        # we cast back to the input dtype
+        routing_weights = routing_weights.to(hidden_states.dtype)
+
+        final_hidden_states = torch.zeros(
+            (batch_size * sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
+        # One hot encode the selected experts to create an expert mask
+        # this will be used to easily index which expert is going to be sollicitated
+        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
+
+        # Loop over all available experts in the model and perform the computation on each expert
+        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+
+        #self._load_experts_weights(expert_hit.cpu().squeeze().tolist()) #meine
+
+        for expert_idx in expert_hit:
+            expert_layer = self.experts[expert_idx]
+            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
+
+            # Index the correct hidden states and compute the expert hidden state for
+            # the current expert. We need to make sure to multiply the output hidden
+            # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+
+            # However `index_add_` only support torch tensors for indexing so we'll use
+            # the `top_x` tensor here.
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
+
+        shared_expert_output = self.shared_expert(hidden_states)
+        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+
+        final_hidden_states = final_hidden_states + shared_expert_output
+
+        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        return final_hidden_states, router_logits
+
+
 
 class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, loaderLayer):
 	def __init__(self, config, layer_idx):
@@ -73,8 +134,7 @@ class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, loaderLayer):
 			for expert_idx, expert_layer in enumerate(self.mlp.experts):
 				expert_layer.expert_idx = expert_idx
 				expert_layer.layer_idx = layer_idx
-				#expert_layer._unload_expert_weights()
-
+				expert_layer._unload_expert_weights()
 
 	def forward(self, *args, **kwargs):
 		self._load_layer_weights()
@@ -160,10 +220,9 @@ class MyQwen3NextModel(Qwen3NextModel):
 		)
 
 
-
 import transformers.models.qwen3_next.modeling_qwen3_next as modeling
 modeling.Qwen3NextMLP = MyQwen3NextMLP
-#modeling.Qwen3NextSparseMoeBlock = MyQwen3NextSparseMoeBlock
+modeling.Qwen3NextSparseMoeBlock = MyQwen3NextSparseMoeBlock
 modeling.Qwen3NextModel = MyQwen3NextModel
 #===============================================
 
@@ -174,7 +233,7 @@ class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 		self.num_hidden_layers = config.num_hidden_layers
 
 	def generate(self, **args):
-		with torch.no_grad():
+		with torch.no_grad():			
 			return super().generate(**args)
 
 	def offload_layers_to_cpu(self, layers_num=2):
@@ -185,15 +244,15 @@ class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 		layer_idx = 0
 		while (gpu_layers_num>0 or cpu_layers_num>0) and layer_idx < self.num_hidden_layers:
 			base = f"model.layers.{layer_idx}."
-			loader.preload_layer_safetensors(base)
+			#loader.preload_layer_safetensors(base)
 			if gpu_layers_num>0:
 				loader.offload_dict_to_gpu_cpu(base, gpu=True)
 				gpu_layers_num-=1
 			else:
 				loader.offload_dict_to_gpu_cpu(base, gpu=False)
-				cpu_layers_num-=1				
+				cpu_layers_num-=1
 			layer_idx+=1
-		import gc; gc.collect()
+		#import gc; gc.collect()
 		print("finished offloading layers to CPU/GPU")
 
 
@@ -232,24 +291,34 @@ class MyQwen3NextForCausalLM_MTP(MyQwen3NextForCausalLM):
 		self.mtp = Qwen3NextMultiTokenPredictor(config)
 		self.logits2 = None
 		self.past_key_values = None
+		self.input_ids, self.cache_position = None, None
 	
-	def forward(self, **args):		
-		if not self.logits2:
+	def forward(self, **args):
+		if self.logits2 is None:
+			if self.input_ids: 
+				#args["input_ids"] = torch.cat([args["input_ids"], self.input_ids], dim=-1)
+				#args["cache_position"] = torch.cat([self.cache_position, args["cache_position"]], dim=-1)
+				pass
+
 			outputs = self.model(**args)
-			hidden_states, past_key_values = outputs.last_hidden_state, outputs.past_key_values						
+			hidden_states, past_key_values = outputs.last_hidden_state, outputs.past_key_values
 			logits = self.lm_head(hidden_states[:, -1:, :])
 			self.past_key_values = past_key_values
 
+			#MTP
 			position_ids = args["cache_position"].unsqueeze(0)
+			print(args, args["input_ids"].shape, "-- input_ids. position_ids:", position_ids)
 			position_embeddings = self.model.rotary_emb(hidden_states, position_ids)
 			inputs_embeds = self.model.embed_tokens(args["input_ids"]) #double computation, can be taken from main model
 			outputs = self.mtp(hidden_states, inputs_embeds, position_ids, position_embeddings)
 			hidden_states = outputs.last_hidden_state
 			self.logits2 = self.lm_head(hidden_states[:, -1:, :])
+			#print(past_key_values, past_key_values.key_cache[0].shape if past_key_values.key_cache[0] else None, "- k shape. hs:", hidden_states.shape)
 		else:
+			self.input_ids, self.cache_position = args["input_ids"], args["cache_position"]
 			logits, past_key_values = self.logits2, self.past_key_values
-			self.logits2, self.past_key_values = None, None
-
+			self.logits2 = None
+		
 		return MoeCausalLMOutputWithPast(
 			logits=logits,
 			past_key_values=past_key_values
