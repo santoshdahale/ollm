@@ -36,6 +36,6 @@ if 1==1:
 	#model.clean_layers_weights()
 	model.eval()
 	model.to(device)
-	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
+	model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
 	#model.offload_layers_to_cpu(layers_num=48)
 	inference_chat()

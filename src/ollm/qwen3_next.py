@@ -59,10 +59,14 @@ class loaderLayer:
 		for expert_idx in experts_idx:
 			self.experts[expert_idx]._load_expert_weights()
 
+	def _unload_experts_weights(self, experts_idx):
+		for expert_idx in experts_idx:
+			self.experts[expert_idx]._unload_expert_weights()
+
 
 class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 	def forward(self, x):
-		#if hasattr(self, "expert_idx"): self._load_expert_weights()
+		if hasattr(self, "expert_idx"): self._load_expert_weights()
 		out = super().forward(x)
 		if hasattr(self, "expert_idx"): self._unload_expert_weights()
 		return out
@@ -70,7 +74,7 @@ class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 
 class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 
-	def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+	def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: #stacked
 		batch_size, sequence_length, hidden_dim = hidden_states.shape
 		hidden_states = hidden_states.view(-1, hidden_dim)
 		# router_logits: (batch * sequence_length, n_experts)
@@ -92,10 +96,8 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
 		# Loop over all available experts in the model and perform the computation on each expert
-		expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()[:20]
-		self._load_experts_weights(expert_hit.cpu().squeeze().tolist()) #meine
-		
-		#=========
+		expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero() #[:30] # limiting		
+		#===== Stacked part ================================================
 		"""
 		for expert_idx in expert_hit:
 			expert_layer = self.experts[expert_idx]
@@ -110,11 +112,8 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		token_pos_list, expert_id_list, local_rank_list = [], [], []
 
 		for expert_idx in expert_hit:
-			tok_pos, local_rank = torch.where(expert_mask[expert_idx].squeeze(0))
-			if tok_pos.numel() == 0: continue
-			if local_rank.numel() > 0: assert local_rank.max() < hidden_states.size(0), (f"Index {local_rank.max().item()} >= hidden_states.size(0)={hidden_states.size(0)}")
-			assert tok_pos.max() < routing_weights.size(1), (f"Index {tok_pos.max().item()} >= routing_weights.size(1)={routing_weights.size(1)}")
-
+			local_rank, tok_pos = torch.where(expert_mask[expert_idx].squeeze(0))
+			if tok_pos.numel() == 0: continue #?
 			token_pos_list.append(tok_pos)
 			expert_id_list.append(torch.full_like(tok_pos, int(expert_idx)))
 			local_rank_list.append(local_rank)
@@ -131,12 +130,20 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		def stack_params(attr):
 			return torch.stack([getattr(self.experts[eid], attr).weight for eid in expert_ids], dim=0)
 
+		#expert_indexes = expert_hit.cpu().squeeze().tolist()
+		self._load_experts_weights(expert_hit)
 		W_gate = stack_params("gate_proj")     # (E, hidden, in), (E, hidden)
 		W_up   = stack_params("up_proj")       # (E, hidden, in), (E, hidden)
 		W_down = stack_params("down_proj")     # (E, out, hidden), (E, out)
+		self._unload_experts_weights(expert_hit)
+
+		# slice only the experts actually used by these tokens
+		#W_gate = W_gate[expert_ids].to(device=device, dtype=dtype)  # (M, hidden, in)
+		#W_up   = W_up[expert_ids].to(device=device, dtype=dtype)		
+		#W_down = W_down[expert_ids].to(device=device, dtype=dtype)				
 
 		# ---- Layer by layer ----
-		x_un = x.unsqueeze(-1)                                # (M, in, 1)
+		x_un = x.unsqueeze(-1)                       # (M, in, 1)
 		
 		# gate_proj
 		h1 = torch.bmm(W_gate, x_un).squeeze(-1)     # (M, hidden)
@@ -151,20 +158,19 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		out = torch.bmm(W_down, h_un).squeeze(-1)    # (M, out)
 
 		# routing weights
-		rw = routing_weights[token_pos, local_rank].unsqueeze(-1).to(out.dtype)
+		rw = routing_weights[token_pos, local_rank].unsqueeze(-1).to(out.dtype) #out of index here		
 		out = out * rw
 
 		# scatter back
-		final_hidden_states.index_add_(0, token_pos.to(final_hidden_states.device), out.to(final_hidden_states.dtype))
-		print(expert_hit.shape, "x:", x.shape, x_un.shape, "W_gate:", W_gate.shape, "W_up:", W_up.shape, out, out.shape)
-		#==============================================
+		#print("4. expert_hit:", expert_hit.shape, "x:", x.shape, x_un.shape, "W_gate:", W_gate.shape, "W_up:", W_up.shape, out, out.shape)
+		final_hidden_states.index_add_(0, token_pos, out.to(final_hidden_states.dtype))
+		#=========================================================================
 
 		shared_expert_output = self.shared_expert(hidden_states)
 		shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
 		final_hidden_states = final_hidden_states + shared_expert_output
 		final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
 		return final_hidden_states, router_logits
-
 
 
 class MyQwen3NextDecoderLayer(Qwen3NextDecoderLayer, loaderLayer):
