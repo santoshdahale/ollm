@@ -8,12 +8,56 @@ from torch import nn
 import torch.nn.functional as F
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, file_get_contents
+from .kvcache import oCache
 
 #global vars
 loader, stats = None, None
 
 #======== rewriting core classes ==============
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextMLP, Qwen3NextSparseMoeBlock, Qwen3NextDecoderLayer, Qwen3NextConfig, Qwen3NextModel, Qwen3NextForCausalLM, Qwen3NextDynamicCache, Qwen3NextRMSNorm, create_causal_mask, repeat_kv, MoeModelOutputWithPast, MoeCausalLMOutputWithPast, TransformersKwargs, Cache
+
+class Qwen3NextDiskCache(Qwen3NextDynamicCache, oCache):
+	def __init__(self, config, cache_dir="./kv_cache", stats=None):
+		super().__init__(config)
+		self.ini_ocache(cache_dir, stats)
+		self.seq_lengths = [0 for _ in range(len(self.key_cache))]
+
+	def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+		return self.seq_lengths[layer_idx]
+
+	def __getitem__(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+		raise Error("KVCache __getitem__ called. Beam search is not supported")
+
+	def reorder_cache(self, beam_idx: torch.LongTensor):
+		raise Error("KVCache reorder_cache called. Beam search is not supported")
+
+	def update(
+		self,
+		key_states: torch.Tensor,
+		value_states: torch.Tensor,
+		layer_idx: int,
+		cache_kwargs: Optional[Dict[str, Any]] = None,
+	) -> Tuple[torch.Tensor, torch.Tensor]:
+		tensors = self.load_from_disk(layer_idx)
+		if tensors is not None:
+			self.key_cache[layer_idx], self.value_cache[layer_idx] = tensors
+			if layer_idx < len(self.key_cache2):
+				self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], self.key_cache2[layer_idx]], dim=-2)
+				self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], self.value_cache2[layer_idx]], dim=-2)
+				self.key_cache2[layer_idx] = torch.cat([self.key_cache2[layer_idx], key_states], dim=-2)
+				self.value_cache2[layer_idx] = torch.cat([self.value_cache2[layer_idx], value_states], dim=-2)
+			else:
+				self.key_cache2.append(key_states)
+				self.value_cache2.append(value_states)
+		
+		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])
+		self.seq_lengths[layer_idx] = out[0].shape[-2]
+		#print(len(out), out[0].shape, "-- k shape" )
+		if tensors is None: self.save_to_disk(out, layer_idx) #save only first time cause it's slow to save
+		self.key_cache[layer_idx], self.value_cache[layer_idx] = torch.empty(0), torch.empty(0)
+		return out
+
+
 
 class loaderLayer:
 	def _load_layer_weights(self):
@@ -73,8 +117,7 @@ class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 		
 
 class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
-
-	def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: #stacked
+	def forward_stacked(self, hidden_states: torch.Tensor) -> torch.Tensor: #stacked
 		batch_size, sequence_length, hidden_dim = hidden_states.shape
 		hidden_states = hidden_states.view(-1, hidden_dim)
 		# router_logits: (batch * sequence_length, n_experts)

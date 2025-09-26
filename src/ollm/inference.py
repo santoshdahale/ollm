@@ -97,8 +97,11 @@ class Inference:
 		self.model.offload_layers_to_gpu_cpu(**args)
 	
 	def DiskCache(self, cache_dir="./kvcache"):
-		if self.model_id in ["gpt-oss-20B", "qwen3-next-80B"]:
+		if self.model_id in ["gpt-oss-20B"]:
 			print(f"{self.model_id} DiskCache is not supported at the moment. Using default DynamicCache instead")
 			return None
+		elif self.model_id=="qwen3-next-80B":
+			from .qwen3_next import Qwen3NextDiskCache
+			return Qwen3NextDiskCache(self.model.config, cache_dir=cache_dir, stats=self.stats)
 		else:
 			return KVCache(cache_dir=cache_dir, stats=self.stats) #config=?
