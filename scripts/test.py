@@ -5,19 +5,19 @@ from ollm.kvcache import KVCache
 from ollm.gpt_oss import MyGptOssForCausalLM
 from ollm import gpt_oss, gds_loader, llama, qwen3_next
 
-import torch, os
+import torch, os, time
 from datetime import datetime
 from transformers import AutoTokenizer, TextStreamer, DynamicCache
 
 def inference_chat():
 	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
-	sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./temp/chats.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to English).", 500
-	#sm, um, max_new_tokens = file_get_contents("./samples/85k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
+	#sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./temp/chats.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to English).", 500
+	sm, um, max_new_tokens = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 	with torch.no_grad():
-		past_key_values = qwen3_next.Qwen3NextDiskCache(model.config, cache_dir="/media/mega4alik/ssd/kv_cache/", stats=stats) #KVCache(cache_dir="/media/mega4alik/ssd/kv_cache/") #DynamicCache(offloading=True)
+		past_key_values = None #qwen3_next.Qwen3NextDiskCache(model.config, cache_dir="/media/mega4alik/ssd/kv_cache/", stats=stats) #KVCache(cache_dir="/media/mega4alik/ssd/kv_cache/") #DynamicCache(offloading=True)
 		print("\n\nGenerate started.", datetime.now().strftime("%H:%M:%S"), "input_ids.shape:", input_ids.shape)
 		outputs = model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True, streamer=text_streamer).detach().cpu()
 		answer = tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)

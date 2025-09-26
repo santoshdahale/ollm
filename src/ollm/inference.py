@@ -6,10 +6,10 @@ from .gds_loader import GDSWeights, MoEWeightsLoader
 from .kvcache import KVCache
 
 class Inference:
-	def __init__(self, model_id, device="cuda:0"):
+	def __init__(self, model_id, device="cuda:0", logging=True):
 		self.model_id = model_id
 		self.device = torch.device(device)
-		self.stats = Stats()
+		self.stats = Stats() if logging else None
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)

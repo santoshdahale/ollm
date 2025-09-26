@@ -186,7 +186,7 @@ class MyGptOssModel(GptOssModel):
 				**kwargs,
 			)
 
-		print("./gpt_oss.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
+		if stats: print("./gpt_oss.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		hidden_states = self.norm(hidden_states)
 		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
 		#./===================================

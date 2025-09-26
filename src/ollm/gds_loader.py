@@ -173,23 +173,6 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 #=========================================================================
 
 class MoEWeightsLoader(GDSWeights): #qwen3_next
-	def __init2__(self, path: str, device="cuda:0"):
-		self.path = path #<model_dir>
-		index_path = os.path.join(path, 'model.safetensors.index.json')
-		with open(index_path) as f: indexes = json.load(f)
-		self.manifest, self.safetensors = {}, {}
-		for manifest_name, filename in indexes["weight_map"].items():
-			match1 = re.search(r"(model\.layers\.\d+\.mlp\.experts\.\d+\.)", manifest_name)
-			match2 = re.search(r"(model\.layers\.\d+\.)", manifest_name)
-			if match1 or match2:
-				base = match1.group(1) if match1 else match2.group(1)
-				if base not in self.manifest: self.manifest[base] = {}
-				attr_path = manifest_name.replace(base, "")
-				self.manifest[base][attr_path] = filename
-
-		self.device = torch.device(device)
-		self.offloaded_map = {}
-
 	def load_dict_to_cuda(self, base):
 		t = self.get_offloaded_dict_to_cuda(base)
 		if t: return t
@@ -210,7 +193,27 @@ class MoEWeightsLoader(GDSWeights): #qwen3_next
 	def load_dict_from_disk(self, base, device='cpu'): #legacy base.pt(attr=>tensor)
 		return torch.load(self.path+base.replace(".","__")+".pt", map_location=device) #{self_attn.weight=tensor}
 		
-	def load_dict_from_disk2(self, base, device='cpu'): #original safetensors
+
+
+class MoEWeightsLoader2(MoEWeightsLoader): #qwen3_next safetensors
+	def __init__(self, path: str, device="cuda:0"):
+		self.path = path #<model_dir>
+		index_path = os.path.join(path, 'model.safetensors.index.json')
+		with open(index_path) as f: indexes = json.load(f)
+		self.manifest, self.safetensors = {}, {}
+		for manifest_name, filename in indexes["weight_map"].items():
+			match1 = re.search(r"(model\.layers\.\d+\.mlp\.experts\.\d+\.)", manifest_name)
+			match2 = re.search(r"(model\.layers\.\d+\.)", manifest_name)
+			if match1 or match2:
+				base = match1.group(1) if match1 else match2.group(1)
+				if base not in self.manifest: self.manifest[base] = {}
+				attr_path = manifest_name.replace(base, "")
+				self.manifest[base][attr_path] = filename
+
+		self.device = torch.device(device)
+		self.offloaded_map = {}
+
+	def load_dict_from_disk(self, base, device='cpu'): #original safetensors
 		dbase, d = self.manifest[base], {}
 		for attr_path, filename in dbase.items():
 			d[attr_path] = self.safetensors[filename].get_tensor(base+attr_path).to(device)
@@ -224,7 +227,6 @@ class MoEWeightsLoader(GDSWeights): #qwen3_next
 				for attr_path, filename in self.manifest[base1].items():
 					if filename not in self.safetensors:
 						self.safetensors[filename] = safe_open(os.path.join(self.path, filename), framework="pt") #KvikIOLoader
-
 
 #=========================================================================
 

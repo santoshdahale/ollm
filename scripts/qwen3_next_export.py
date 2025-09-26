@@ -37,7 +37,7 @@ def export_nonlayer_weights():
     save_file(d, out_dir+"model.safetensors")
 
 #====================================
-path, out_dir = "/home/mega4alik/Desktop/models/qwen3-next-80B/", "/media/mega4alik/ssd2/models/qwen3-next-80B/"
+path, out_dir = "/home/mega4alik/Desktop/models/qwen3-next-80B/", "/media/mega4alik/ssd2/models/qwen3-next-80B/gds_export/"
 wmap = json.loads(file_get_contents(f"{path}model.safetensors.index.json"))["weight_map"]
 num_hidden_layers, num_experts = 48, 512
 

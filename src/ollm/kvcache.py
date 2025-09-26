@@ -5,7 +5,7 @@ from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
 
 class oCache:	
 	def ini_ocache(self, cache_dir, stats):
-		if not cache_dir: raise Error("cache_dir can not be empty. If you are tring to not use DiskCache, simply set past_key_values=None. This will use default DynamicCache")
+		if not cache_dir: raise Error("cache_dir can not be empty. If you are trying to not use DiskCache, simply set past_key_values=None. This will use default DynamicCache")
 		self.cache_folder = os.path.join(cache_dir, "kv_cache")
 		self.key_cache2, self.value_cache2 = [], []
 		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)

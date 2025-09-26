@@ -58,7 +58,6 @@ class Qwen3NextDiskCache(Qwen3NextDynamicCache, oCache):
 		return out
 
 
-
 class loaderLayer:
 	def _load_layer_weights(self):
 		t1 = time.perf_counter()
@@ -70,19 +69,11 @@ class loaderLayer:
 			_assign_tensor_to_module(parent, leaf, tensor)
 		if stats: stats.set("layer_load", t1)
 			
-	def _unload_layer_weights(self): #v1 with separate files for each base
+	def _unload_layer_weights(self):
 		base = f"model.layers.{self.layer_idx}."
 		for attr_path in loader.manifest[base]:
 			parent, leaf = _walk_to_parent(self, attr_path)
 			_set_meta_placeholder(parent, leaf)
-	
-	def _unload_layer_weights2(self):
-		base = f"model.layers.{self.layer_idx}."
-		for base1 in list(loader.manifest.keys()):
-			if base1.startswith(base):
-				for attr_path, filename in loader.manifest[base1].items():
-					parent, leaf = _walk_to_parent(self, base1[len(base):]+attr_path)
-					_set_meta_placeholder(parent, leaf)
 
 	def _load_expert_weights(self):
 		t1 = time.perf_counter()
@@ -117,7 +108,7 @@ class MyQwen3NextMLP(Qwen3NextMLP, loaderLayer):
 		
 
 class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
-	def forward_stacked(self, hidden_states: torch.Tensor) -> torch.Tensor: #stacked
+	def forward_stacked(self, hidden_states: torch.Tensor) -> torch.Tensor: #stacked+chunked experimental
 		batch_size, sequence_length, hidden_dim = hidden_states.shape
 		hidden_states = hidden_states.view(-1, hidden_dim)
 		# router_logits: (batch * sequence_length, n_experts)
@@ -139,8 +130,7 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
 
 		# Loop over all available experts in the model and perform the computation on each expert
-		expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero() #[:30] # limiting		
-		#===== Stacked part ================================================
+		expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
 		"""
 		for expert_idx in expert_hit:
 			expert_layer = self.experts[expert_idx]
@@ -148,7 +138,10 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 			current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
 			current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
 			final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))	
-		"""
+		"""		
+		#===== Chunked Stacked part =====================================
+		#for start_idx in range(0, experts_hit.shape[0], 5):
+		#expert_hit = experts_hit[start_idx : start_idx+5]
 
 		# assume experts all share dimensions:
 		# in_dim -> hidden_dim -> out_dim
@@ -164,6 +157,7 @@ class MyQwen3NextSparseMoeBlock(Qwen3NextSparseMoeBlock, loaderLayer):
 		token_pos = torch.cat(token_pos_list)      # (M,)
 		expert_ids = torch.cat(expert_id_list)     # (M,)
 		local_rank = torch.cat(local_rank_list)    # (M,)
+		print(expert_hit.shape, expert_ids.shape)
 
 		x = hidden_states[token_pos]               # (M, in_dim)
 		M, in_dim = x.shape
@@ -287,6 +281,7 @@ class MyQwen3NextModel(Qwen3NextModel):
 		position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
 		#===============================================
+		self.embed_tokens.cpu(); self.parent_lm_head.cpu()
 		for decoder_layer in self.layers:
 			#print(decoder_layer.layer_idx, "decoder_layer /", self.config.num_hidden_layers, stats.print_and_clean())
 			layer_mask = linear_attn_mask if decoder_layer.layer_type == "linear_attention" else causal_mask
@@ -300,9 +295,10 @@ class MyQwen3NextModel(Qwen3NextModel):
 				cache_position=cache_position,
 				**kwargs,
 			)
-
-		print("./qwen3_next.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
+		
 		hidden_states = self.norm(hidden_states)
+		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
+		if stats: print("./qwen3_next.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		#================================================
 
 		return MoeModelOutputWithPast(
@@ -321,6 +317,7 @@ modeling.Qwen3NextModel = MyQwen3NextModel
 class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 	def __init__(self, config):
 		super().__init__(config)
+		self.model.parent_lm_head = self.lm_head #link
 		self.num_hidden_layers = config.num_hidden_layers
 
 	def generate(self, **args):
