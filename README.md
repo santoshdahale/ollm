@@ -1,8 +1,9 @@
+
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://ollm.s3.us-east-1.amazonaws.com/files/logo.png">
-    <img alt="vLLM" src="https://ollm.s3.us-east-1.amazonaws.com/files/logo.png" width=52%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://ollm.s3.us-east-1.amazonaws.com/files/logo2.png">
+    <img alt="vLLM" src="https://ollm.s3.us-east-1.amazonaws.com/files/logo2.png" width=52%>
   </picture>
 </p>
 
@@ -26,7 +27,7 @@ oLLM is a lightweight Python library for large-context LLM inference, built on t
 
 | Model   | Weights | Context length | KV cache |  Baseline VRAM (no offload) | oLLM GPU VRAM | oLLM Disk (SSD) |
 | ------- | ------- | -------- | ------------- | ------------ | ---------------- | --------------- |
-| [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | 160 GB (bf16) | 50k | 2 GB | ~170 GB   | ~7.5 GB | 162 GB  |
+| [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | 160 GB (bf16) | 50k | 20 GB | ~190 GB   | ~7.5 GB | 180 GB  |
 | [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (packed bf16) | 10k | 1.4 GB | ~40 GB   | ~7.3GB | 15 GB  |
 | [llama3-1B-chat](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)  | 2 GB (fp16) | 100k   | 12.6 GB          | ~16 GB   | ~5 GB       | 15 GB  |
 | [llama3-3B-chat](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)  | 7 GB (fp16) | 100k  | 34.1 GB | ~42 GB   | ~5.3 GB     | 42 GB |
@@ -76,7 +77,7 @@ Code snippet sample
 
 ```bash
 from ollm import Inference, file_get_contents, TextStreamer
-o = Inference("llama3-1B-chat", device="cuda:0") #llama3-1B/3B/8B-chat, gpt-oss-20B, qwen3-next-80B
+o = Inference("llama3-1B-chat", device="cuda:0", logging=True) #llama3-1B/3B/8B-chat, gpt-oss-20B, qwen3-next-80B
 o.ini_model(models_dir="./models/", force_download=False)
 o.offload_layers_to_cpu(layers_num=2) #(optional) offload some layers to CPU for speed boost
 past_key_values = o.DiskCache(cache_dir="./kv_cache/") #set None if context is small
@@ -92,4 +93,3 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
-
