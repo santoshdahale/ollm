@@ -3,7 +3,8 @@ import torch
 from torch.utils.dlpack import from_dlpack
 import cupy as cp
 import kvikio
-from safetensors.torch import safe_open, load_file
+#from safetensors.torch import safe_open, load_file
+import struct
 
 stats = None
 
@@ -63,7 +64,6 @@ class GDSWeights:
 
 	def has(self, name: str) -> bool:
 		return name in self.manifest
-
 
 	def load_torch_from_disk(self, path):
 		tensor = torch.load(path, map_location=self.device)
@@ -172,7 +172,47 @@ def convert_moe_packed_tensors( #copied from transformers/integrations/mxfp4.py
 
 #=========================================================================
 
-class MoEWeightsLoader(GDSWeights): #qwen3_next
+class asyncCudaLoader: #it's slow, maybe need to adapt for experts common load
+	def async_move_to_gpu(self, tensor, stream=None):		
+		if not tensor.is_pinned():
+			try:
+				tensor = tensor.pin_memory()
+			except Exception:
+				# some dtypes or storages may not support pinning; fall back gracefully
+				pass
+
+		if stream is None:
+			return tensor.to(device=self.device, non_blocking=True)
+
+		with torch.cuda.stream(stream):
+			dst = tensor.to(device=self.device, non_blocking=True)
+		return dst
+
+	def load_pt_to_gpu(self, pt_path, max_workers=4):
+		gpu_state = {}
+		obj = torch.load(pt_path, map_location="cpu")		
+		streams = [torch.cuda.Stream(device=self.device) for _ in range(max_workers)]
+		executor = ThreadPoolExecutor(max_workers=max_workers)
+		
+		def handle_item(key, val, stream_idx):
+			stream = streams[stream_idx % len(streams)]
+			return self.async_move_to_gpu(val, stream=stream)
+
+		futures, idx = {}, 0
+		for k, v in obj.items():
+			futures[k] = executor.submit(handle_item, k, v, idx)
+			idx += 1
+
+		# collect results
+		for k, fut in futures.items(): gpu_state[k] = fut.result()
+
+		# synchronize all streams to ensure transfers are finished
+		for s in streams: s.synchronize()
+		executor.shutdown(wait=True)
+		return gpu_state
+
+
+class MoEWeightsLoader(GDSWeights): #qwen3_next base.pt(dict: attr=>tensor)
 	def load_dict_to_cuda(self, base):
 		t = self.get_offloaded_dict_to_cuda(base)
 		if t: return t
@@ -186,13 +226,39 @@ class MoEWeightsLoader(GDSWeights): #qwen3_next
 		if base in self.offloaded_map:
 			d, d2 = self.offloaded_map[base], {}
 			for attr_path, tensor in d.items():
-				d2[attr_path] = tensor.to(self.device)
+				d2[attr_path] = tensor.to(self.device, non_blocking=True)
 			return d2
 		return None
 	
-	def load_dict_from_disk(self, base, device='cpu'): #legacy base.pt(attr=>tensor)
-		return torch.load(self.path+base.replace(".","__")+".pt", map_location=device) #{self_attn.weight=tensor}
-		
+	def load_dict_from_disk(self, base, device='cpu'):
+		return torch.load(self.path+base.replace(".","__")+".pt", map_location=device)
+
+#=========================================================================
+
+class SafeTensorReader: #safetensors replacement because its mmap is killing the RAM
+	def __init__(self, path):
+		self.path = path		
+		with open(path, "rb") as f:
+			header_len = struct.unpack("<Q", f.read(8))[0]
+			self.header = json.loads(f.read(header_len))
+			self.data_offset = 8 + header_len
+		self._fp = open(path, "rb")
+		self.DTYPE_MAP = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16}
+	
+	def close(self):
+		self._fp.close()
+
+	def keys(self):
+		return list(self.header.keys())
+
+	def get_tensor(self, name):
+		info = self.header[name]
+		dtype = self.DTYPE_MAP[info["dtype"]]
+		shape = info["shape"]
+		off0, off1 = info["data_offsets"]
+		self._fp.seek(self.data_offset + off0)
+		buf = self._fp.read(off1 - off0)
+		return torch.frombuffer(memoryview(buf), dtype=dtype).reshape(shape)
 
 
 class MoEWeightsLoader2(MoEWeightsLoader): #qwen3_next safetensors
@@ -220,13 +286,15 @@ class MoEWeightsLoader2(MoEWeightsLoader): #qwen3_next safetensors
 		return d
 
 	def preload_layer_safetensors(self, base): #load only couple instead of 48
-		del self.safetensors
-		self.safetensors = {}
+		#for filename, x in self.safetensors.items(): x.close() #f.__exit__(None, None, None)
+		#del self.safetensors
+		#self.safetensors = {}
 		for base1 in list(self.manifest.keys()):
 			if base1.startswith(base):
 				for attr_path, filename in self.manifest[base1].items():
 					if filename not in self.safetensors:
-						self.safetensors[filename] = safe_open(os.path.join(self.path, filename), framework="pt") #KvikIOLoader
+						filepath = os.path.join(self.path, filename)
+						self.safetensors[filename] = SafeTensorReader(filepath) #safe_open(filepath, framework="pt")
 
 #=========================================================================
 

@@ -332,7 +332,7 @@ class MyQwen3NextForCausalLM(Qwen3NextForCausalLM):
 		layer_idx = 0
 		while (gpu_layers_num>0 or cpu_layers_num>0) and layer_idx < self.num_hidden_layers:
 			base = f"model.layers.{layer_idx}."
-			#loader.preload_layer_safetensors(base)
+			loader.preload_layer_safetensors(base)
 			if gpu_layers_num>0:
 				loader.offload_dict_to_gpu_cpu(base, gpu=True)
 				gpu_layers_num-=1

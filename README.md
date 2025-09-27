@@ -11,13 +11,14 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
-<p dir="auto"><em>Latest updates (0.4.0)</em> 🔥</p>
+<p dir="auto"><em>Latest updates (0.4.1)</em> 🔥</p>
 <ul dir="auto">
-<li><b>qwen3-next-80B</b> (160GB model) added with <span style="color:blue">⚡️1tok/2s</span> throughput (fastest model so far)</li>
+<li>.safetensors files are now read without `mmap` so they no longer consume RAM through page cache</li>
+<li>qwen3-next-80B DiskCache support added</li>
+<li><b>qwen3-next-80B</b> (160GB model) added with <span style="color:blue">⚡️1tok/2s</span> throughput (our fastest model so far)</li>
 <li>Llama3 custom chunked attention replaced with flash-attention2 for stability</li>
 <li>gpt-oss-20B flash-attention-like implementation added to reduce VRAM usage </li>
 <li>gpt-oss-20B chunked MLP added to reduce VRAM usage </li>
-<li>KVCache is replaced with DiskCache.</li>
 </ul>
 
 ---
@@ -25,7 +26,7 @@ oLLM is a lightweight Python library for large-context LLM inference, built on t
 
 | Model   | Weights | Context length | KV cache |  Baseline VRAM (no offload) | oLLM GPU VRAM | oLLM Disk (SSD) |
 | ------- | ------- | -------- | ------------- | ------------ | ---------------- | --------------- |
-| [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | 160 GB (bf16) | 10k | 1.4 GB | ~170 GB   | ~5.4 GB | 162 GB  |
+| [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | 160 GB (bf16) | 50k | 2 GB | ~170 GB   | ~7.5 GB | 162 GB  |
 | [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (packed bf16) | 10k | 1.4 GB | ~40 GB   | ~7.3GB | 15 GB  |
 | [llama3-1B-chat](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)  | 2 GB (fp16) | 100k   | 12.6 GB          | ~16 GB   | ~5 GB       | 15 GB  |
 | [llama3-3B-chat](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)  | 7 GB (fp16) | 100k  | 34.1 GB | ~42 GB   | ~5.3 GB     | 42 GB |
@@ -91,3 +92,4 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
+

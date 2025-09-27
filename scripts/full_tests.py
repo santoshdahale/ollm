@@ -47,5 +47,5 @@ for test_id in test_ids:
 
 	if test_id==4: #4. qwen3-next-80B, make sure it generates proper output on 45k sample
 		sm, um = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.",
-		ans = run_test("4", "qwen3-next-80B", sm, um, kvcache="disk", offload_layers_to_cpu=0)
+		ans = run_test("4", "qwen3-next-80B", sm, um, kvcache="disk", offload_layers_to_cpu=48)
 		print("#4.TestSuccess")

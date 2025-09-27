@@ -1,5 +1,5 @@
 from ollm import Inference, file_get_contents
-from ollm.gds_loader import GDSWeights, MoEWeightsLoader
+from ollm.gds_loader import GDSWeights, MoEWeightsLoader, MoEWeightsLoader2
 from ollm.utils import Stats
 from ollm.kvcache import KVCache
 from ollm.gpt_oss import MyGptOssForCausalLM
@@ -10,9 +10,9 @@ from datetime import datetime
 from transformers import AutoTokenizer, TextStreamer, DynamicCache
 
 def inference_chat():
-	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
+	sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
 	#sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./temp/chats.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to English).", 500
-	sm, um, max_new_tokens = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
+	#sm, um, max_new_tokens = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
@@ -26,9 +26,9 @@ def inference_chat():
 #=======================================================
 if 1==1:
 	device = torch.device("cuda:0")
-	model_dir ="/media/mega4alik/ssd2/models/qwen3-next-80B/"  #"/media/mega4alik/ssd/models/gpt-oss-20B/"
+	model_dir ="/media/mega4alik/ssd2/models/qwen3-next-80B/"
 	print("loading", model_dir)
-	qwen3_next.loader = MoEWeightsLoader(model_dir+"gds_export/", device="cuda:0")
+	qwen3_next.loader = MoEWeightsLoader2(model_dir, device="cuda:0")
 	stats = Stats()
 	qwen3_next.stats, gds_loader.stats = stats, stats
 	tokenizer = AutoTokenizer.from_pretrained(model_dir)
@@ -36,6 +36,6 @@ if 1==1:
 	#model.clean_layers_weights()
 	model.eval()
 	model.to(device)
-	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
+	model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
 	#model.offload_layers_to_cpu(layers_num=48)
 	inference_chat()
