@@ -2,14 +2,14 @@ import os, requests, zipfile
 import torch
 from transformers import AutoTokenizer
 from .utils import Stats, file_get_contents
-from .gds_loader import GDSWeights, MoEWeightsLoader
+from .gds_loader import GDSWeights, MoEWeightsLoader2
 from .kvcache import KVCache
 
 class Inference:
-	def __init__(self, model_id, device="cuda:0"):
+	def __init__(self, model_id, device="cuda:0", logging=True):
 		self.model_id = model_id
 		self.device = torch.device(device)
-		self.stats = Stats()
+		self.stats = Stats() if logging else None
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)
@@ -70,7 +70,7 @@ class Inference:
 		print("loading model from", model_dir)
 		if self.model_id=="qwen3-next-80B":
 			from . import qwen3_next
-			qwen3_next.loader = MoEWeightsLoader(model_dir)
+			qwen3_next.loader = MoEWeightsLoader2(model_dir)
 			qwen3_next.stats = self.stats
 			self.model = qwen3_next.MyQwen3NextForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 		elif self.model_id=="gpt-oss-20B":
@@ -97,8 +97,11 @@ class Inference:
 		self.model.offload_layers_to_gpu_cpu(**args)
 	
 	def DiskCache(self, cache_dir="./kvcache"):
-		if self.model_id in ["gpt-oss-20B", "qwen3-next-80B"]:
+		if self.model_id in ["gpt-oss-20B"]:
 			print(f"{self.model_id} DiskCache is not supported at the moment. Using default DynamicCache instead")
 			return None
+		elif self.model_id=="qwen3-next-80B":
+			from .qwen3_next import Qwen3NextDiskCache
+			return Qwen3NextDiskCache(self.model.config, cache_dir=cache_dir, stats=self.stats)
 		else:
 			return KVCache(cache_dir=cache_dir, stats=self.stats) #config=?

@@ -35,8 +35,7 @@ class MyLlamaAttention(LlamaAttention):
 
 		query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 		key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-		value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)        
-		#print(query_states.shape, key_states.shape, value_states.shape); exit()
+		value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)		
 
 		cos, sin = position_embeddings		
 		query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
@@ -76,8 +75,7 @@ class MyLlamaMLP(LlamaMLP):
 		chunk_size, chunks = 16384, []
 		x = x.squeeze(0)
 		for i in range(0, x.shape[0], chunk_size):
-			gate_chunk = self.act_fn(self.gate_proj(x[i:i+chunk_size]))
-			#print("gate:", gate_chunk.dtype, gate_chunk.shape, self.tensor_size_gb(gate_chunk))
+			gate_chunk = self.act_fn(self.gate_proj(x[i:i+chunk_size]))			
 			up_chunk = self.up_proj(x[i:i+chunk_size])
 			out_chunk = self.down_proj(gate_chunk * up_chunk)
 			chunks.append(out_chunk)
@@ -208,7 +206,7 @@ class MyLlamaModel(LlamaModel):
 
 		hidden_states = self.norm(hidden_states)
 		self.embed_tokens.to(hidden_states.device); self.parent_lm_head.to(hidden_states.device)
-		print("./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
+		if stats: print("./Llama.forward.", datetime.now().strftime("%H:%M:%S"), stats.print_and_clean() if stats else "")
 		#====================================
 		
 		return BaseModelOutputWithPast(

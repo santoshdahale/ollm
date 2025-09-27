@@ -3,14 +3,35 @@ import torch
 from transformers import DynamicCache
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List
 
-class KVCache(DynamicCache):
-	def __init__(self, cache_dir="./kv_cache", stats=None):
-		super().__init__()
+class oCache:	
+	def ini_ocache(self, cache_dir, stats):
+		if not cache_dir: raise Error("cache_dir can not be empty. If you are trying to not use DiskCache, simply set past_key_values=None. This will use default DynamicCache")
 		self.cache_folder = os.path.join(cache_dir, "kv_cache")
 		self.key_cache2, self.value_cache2 = [], []
 		if os.path.exists(self.cache_folder): shutil.rmtree(self.cache_folder)
 		os.makedirs(self.cache_folder)
 		self.stats = stats
+
+	def load_from_disk(self, layer_idx, device="cuda:0"):
+		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
+		if not os.path.exists(path): return None
+		t1 = time.perf_counter()
+		tensors = torch.load(path, map_location=device)
+		if self.stats: self.stats.set("kvload", t1)
+		return tensors
+
+	def save_to_disk(self, tensors, layer_idx):
+		t1 = time.perf_counter()
+		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
+		tensors = (tensors[0].cpu(), tensors[1].cpu())
+		torch.save(tensors, path)
+		if self.stats: self.stats.set("kvsave", t1)
+
+
+class KVCache(DynamicCache, oCache): #DiskCache
+	def __init__(self, cache_dir="./kv_cache", stats=None):
+		super().__init__()		
+		self.ini_ocache(cache_dir, stats)
 
 	def update(
 		self,
@@ -36,20 +57,6 @@ class KVCache(DynamicCache):
 		self.layers[layer_idx].keys, self.layers[layer_idx].values = None, None
 		return out
 
-	def load_from_disk(self, layer_idx, device="cuda:0"):
-		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		if not os.path.exists(path): return None
-		t1 = time.perf_counter()
-		tensors = torch.load(path, map_location=device)
-		if self.stats: self.stats.set("kvload", t1)
-		return tensors
-
-	def save_to_disk(self, tensors, layer_idx):
-		t1 = time.perf_counter()
-		path = f"{self.cache_folder}/layer_{layer_idx}.pt"
-		tensors = (tensors[0].cpu(), tensors[1].cpu())
-		torch.save(tensors, path)
-		if self.stats: self.stats.set("kvsave", t1)
 
 
 class KVCache_legacy(DynamicCache):
