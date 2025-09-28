@@ -12,7 +12,7 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
-<p dir="auto"><em>Latest updates (0.4.1)</em> 🔥</p>
+<p dir="auto"><em>Latest updates (0.4.2)</em> 🔥</p>
 <ul dir="auto">
 <li>.safetensors files are now read without `mmap` so they no longer consume RAM through page cache</li>
 <li>qwen3-next-80B DiskCache support added</li>

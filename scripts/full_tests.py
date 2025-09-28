@@ -49,3 +49,8 @@ for test_id in test_ids:
 		sm, um = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.",
 		ans = run_test("4", "qwen3-next-80B", sm, um, kvcache="disk", offload_layers_to_cpu=48)
 		print("#4.TestSuccess")
+
+	if test_id==5: #5. qwen3-next-80B, make sure it runs without offloading
+		sm, um = "[CHATS]:\n"+file_get_contents("./samples/2k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english)."
+		ans = run_test("5", "qwen3-next-80B", sm, um, kvcache="disk")
+		print("#5.TestSuccess")
