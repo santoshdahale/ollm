@@ -17,7 +17,7 @@ def inference_chat():
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 	with torch.no_grad():
-		past_key_values = None #qwen3_next.Qwen3NextDiskCache(model.config, cache_dir="/media/mega4alik/ssd/kv_cache/", stats=stats) #KVCache(cache_dir="/media/mega4alik/ssd/kv_cache/") #DynamicCache(offloading=True)
+		past_key_values = None #qwen3_next.Qwen3NextDiskCache(model.config, cache_dir="/media/mega4alik/ssd/kv_cache/", stats=stats) #KVCache #DynamicCache(offloading=True)
 		print("\n\nGenerate started.", datetime.now().strftime("%H:%M:%S"), "input_ids.shape:", input_ids.shape)
 		outputs = model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True, streamer=text_streamer).detach().cpu()
 		answer = tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
@@ -36,6 +36,6 @@ if 1==1:
 	#model.clean_layers_weights()
 	model.eval()
 	model.to(device)
-	model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
+	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
 	#model.offload_layers_to_cpu(layers_num=48)
 	inference_chat()

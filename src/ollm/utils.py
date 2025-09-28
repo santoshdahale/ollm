@@ -38,7 +38,7 @@ def _walk_to_parent(obj, attr_path):
         parent = getattr(parent, p)
     return parent, parts[-1]
 
-def _assign_tensor_to_module(target_parent, leaf, tensor):    
+def _assign_tensor_to_module(target_parent, leaf, tensor):
     """
     Assign a tensor into target_parent.<leaf>.
     - If target_parent.<leaf> has a .load call, call it with tensor.
@@ -59,7 +59,7 @@ def _assign_tensor_to_module(target_parent, leaf, tensor):
         return
 
     # If attribute is a module (like a Linear) we attempt to set its weight/bias
-    if isinstance(existing, nn.Linear) or hasattr(existing, "weight"):
+    if isinstance(existing, torch.nn.Linear) or hasattr(existing, "weight"):
         # try to set weight and bias if given tensor is 2D weight
         if tensor.ndim == 2 and hasattr(existing, "weight"):
             existing.weight = torch.nn.Parameter(tensor.detach(), requires_grad=False)
@@ -86,6 +86,6 @@ def remove_layers_weights(model):
             if hasattr(module, "bias") and module.bias is not None:
                 module.bias = torch.nn.Parameter(
                     torch.empty(0), requires_grad=False
-                )    
+                )
 
 

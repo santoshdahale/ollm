@@ -26,10 +26,10 @@ class Qwen3NextDiskCache(Qwen3NextDynamicCache, oCache):
 		return self.seq_lengths[layer_idx]
 
 	def __getitem__(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-		raise Error("KVCache __getitem__ called. Beam search is not supported")
+		raise NotImplementedError("KVCache __getitem__ called. Beam search is not supported")
 
 	def reorder_cache(self, beam_idx: torch.LongTensor):
-		raise Error("KVCache reorder_cache called. Beam search is not supported")
+		raise NotImplementedError("KVCache reorder_cache called. Beam search is not supported")
 
 	def update(
 		self,
@@ -62,7 +62,7 @@ class loaderLayer:
 	def _load_layer_weights(self):
 		t1 = time.perf_counter()
 		base = f"model.layers.{self.layer_idx}."
-		#loader.preload_layer_safetensors(base)
+		loader.preload_layer_safetensors(base)
 		d = loader.load_dict_to_cuda(base)
 		for attr_path, tensor in d.items():
 			parent, leaf = _walk_to_parent(self, attr_path)

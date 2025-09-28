@@ -242,10 +242,9 @@ class MyLlamaForCausalLM(LlamaForCausalLM):
 				parent, leaf = _walk_to_parent(self, name)
 				_assign_tensor_to_module(parent, leaf, tensor)
 
-	
 	def offload_layers_to_cpu(self, layers_num=2):
 		for layer_idx in range(min(layers_num, self.num_hidden_layers)):			
 			for name, attr in loader.manifest.items():
-				if name.startswith("model.layers.{layer_idx}."):
+				if name.startswith(f"model.layers.{layer_idx}."):
 					loader.offload_param_to_cpu(name)
 		print("./Llama offloading layers to CPU. Done.")
