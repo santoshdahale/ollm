@@ -1,4 +1,3 @@
-
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
@@ -14,7 +13,7 @@ LLM Inference for Large-Context Offline Workloads
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
 <p dir="auto"><em>Latest updates (0.4.2)</em> 🔥</p>
 <ul dir="auto">
-<li>.safetensors files are now read without `mmap` so they no longer consume RAM through page cache</li>
+<li>.safetensor files are now read without `mmap` so they no longer consume RAM through page cache</li>
 <li>qwen3-next-80B DiskCache support added</li>
 <li><b>qwen3-next-80B</b> (160GB model) added with <span style="color:blue">⚡️1tok/2s</span> throughput (our fastest model so far)</li>
 <li>Llama3 custom chunked attention replaced with flash-attention2 for stability</li>
@@ -90,6 +89,15 @@ answer = o.tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_token
 print(answer)
 ```
 or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python example.py` 
+
+## Roadmap
+*For visibility of what's coming next (subject to change)*
+- gemma3-27B (or alternative) coming on Sep 30, Tue
+- Voxtral-small-24B ASR model coming on Oct 3, Fri
+- Qwen3-VL or alternative vision model by Oct 10, Fri
+- Qwen3-Next MultiTokenPrediction in R&D
+- Efficient weight loading in R&D
+
 
 ## Contact us
 If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.

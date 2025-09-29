@@ -23,7 +23,7 @@ def run_test(test_id, model_id, sm, um, kvcache=None, offload_layers_to_gpu=0, o
 
 
 #=======================================================
-test_ids = [4]
+test_ids = [5]
 
 for test_id in test_ids:
 	if test_id==1: #1. Llama3-8B check noKV==newKV2.0 on 10k_chats
@@ -50,7 +50,7 @@ for test_id in test_ids:
 		ans = run_test("4", "qwen3-next-80B", sm, um, kvcache="disk", offload_layers_to_cpu=48)
 		print("#4.TestSuccess")
 
-	if test_id==5: #5. qwen3-next-80B, make sure it runs without offloading
+	if test_id==5: #5. qwen3-next-80B, make sure it runs without offloading and no DiskCache
 		sm, um = "[CHATS]:\n"+file_get_contents("./samples/2k_sample.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to english)."
-		ans = run_test("5", "qwen3-next-80B", sm, um, kvcache="disk")
+		ans = run_test("5", "qwen3-next-80B", sm, um)
 		print("#5.TestSuccess")
