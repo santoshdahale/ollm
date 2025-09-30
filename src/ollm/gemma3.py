@@ -7,13 +7,12 @@ from torch import nn
 import torch.nn.functional as F
 from typing import Callable, Optional, Tuple, Union, Dict, Any, Iterable, List, Unpack
 from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placeholder, file_get_contents
-from .kvcache import oCache
 
 #global vars
 loader, stats = None, None
 
 #======== rewriting core classes ==============
-from transformers.models.gemma3.modeling_gemma3 import Gemma3MLP, Gemma3DecoderLayer, Gemma3Config, Gemma3Model, Gemma3TextModel, Gemma3ForCausalLM, Gemma3RMSNorm, create_sliding_window_causal_mask, create_causal_mask, repeat_kv, TransformersKwargs, Cache, BaseModelOutputWithPast, Gemma3ModelOutputWithPast
+from transformers.models.gemma3.modeling_gemma3 import Gemma3MLP, Gemma3DecoderLayer, Gemma3Config, Gemma3Model, Gemma3TextModel, Gemma3ForCausalLM, Gemma3ForConditionalGeneration, Gemma3RMSNorm, create_sliding_window_causal_mask, create_causal_mask, repeat_kv, TransformersKwargs, Cache, BaseModelOutputWithPast, Gemma3ModelOutputWithPast
 
 class loaderLayer: #gemma3 specific
 	def _load_layer_weights(self):
@@ -43,7 +42,7 @@ class MyGemma3DecoderLayer(Gemma3DecoderLayer, loaderLayer):
 	def __init__(self, config, layer_idx):
 		super().__init__(config, layer_idx)
 		self.layer_idx = layer_idx
-		self.mlp.layer_idx = layer_idx
+		#self.mlp.layer_idx = layer_idx
 
 	def forward(self, *args, **kwargs):
 		self._load_layer_weights()
@@ -59,7 +58,7 @@ class MyGemma3TextModel(Gemma3TextModel):
 		self.layers = nn.ModuleList()
 		for layer_idx in range(config.num_hidden_layers):
 			self.layers.append(MyGemma3DecoderLayer(config, layer_idx))
-			self.layers[-1]._unload_layer_weights()				
+			self.layers[-1]._unload_layer_weights()
 
 	def forward(
 		self,
@@ -170,11 +169,17 @@ class MyGemma3TextModel(Gemma3TextModel):
 		)
 
 
+class MyGemma3Model(Gemma3Model):
+	def __init__(self, config:Gemma3Config):
+		super().__init__(config)
+		self.language_model = MyGemma3TextModel(config.text_config)
+
+
 import transformers.models.gemma3.modeling_gemma3 as modeling
 #modeling.Gemma3MLP = MyGemma3MLP
 modeling.Gemma3TextModel = MyGemma3TextModel
+modeling.Gemma3Model = MyGemma3Model
 #===============================================
-
 
 class MyGemma3ForCausalLM(Gemma3ForCausalLM):
 	def __init__(self, config):
@@ -191,6 +196,9 @@ class MyGemma3ForCausalLM(Gemma3ForCausalLM):
 		for layer_idx in range(min(layers_num, self.num_hidden_layers)):
 			base = f"language_model.model.layers.{layer_idx}."
 			loader.preload_layer_safetensors(base)
-			loader.offload_dict_to_gpu_cpu(base, gpu=False)
-		#import gc; gc.collect()
+			loader.offload_dict_to_gpu_cpu(base, gpu=False)		
 		print("finished offloading layers to CPU")
+
+
+class MyGemma3ForConditionalGeneration(Gemma3ForConditionalGeneration):
+	pass
