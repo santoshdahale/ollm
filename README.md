@@ -91,6 +91,9 @@ print(answer)
 ```
 or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python example.py` 
 
+**More samples**
+- [gemma3-12B image+text ](https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py)
+
 ## Roadmap
 *For visibility of what's coming next (subject to change)*
 - Voxtral-small-24B ASR model coming on Oct 5, Sun
