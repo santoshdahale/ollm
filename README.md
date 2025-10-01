@@ -11,12 +11,12 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
-<p dir="auto"><em>Latest updates (0.4.2)</em> 🔥</p>
+<p dir="auto"><em>Latest updates (0.5.0)</em> 🔥</p>
 <ul dir="auto">
+<li>Multimodal <b>gemma3-12B</b> (image+text) added. <a href="https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py">[sample with image]</a> </li>
 <li>.safetensor files are now read without `mmap` so they no longer consume RAM through page cache</li>
 <li>qwen3-next-80B DiskCache support added</li>
 <li><b>qwen3-next-80B</b> (160GB model) added with <span style="color:blue">⚡️1tok/2s</span> throughput (our fastest model so far)</li>
-<li>Llama3 custom chunked attention replaced with flash-attention2 for stability</li>
 <li>gpt-oss-20B flash-attention-like implementation added to reduce VRAM usage </li>
 <li>gpt-oss-20B chunked MLP added to reduce VRAM usage </li>
 </ul>
@@ -28,6 +28,7 @@ oLLM is a lightweight Python library for large-context LLM inference, built on t
 | ------- | ------- | -------- | ------------- | ------------ | ---------------- | --------------- |
 | [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) | 160 GB (bf16) | 50k | 20 GB | ~190 GB   | ~7.5 GB | 180 GB  |
 | [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b) | 13 GB (packed bf16) | 10k | 1.4 GB | ~40 GB   | ~7.3GB | 15 GB  |
+| [gemma3-12B](https://huggingface.co/google/gemma-3-12b-it)  | 25 GB (bf16) | 50k   | 18.5 GB          | ~45 GB   | ~6.7 GB       | 43 GB  |
 | [llama3-1B-chat](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)  | 2 GB (fp16) | 100k   | 12.6 GB          | ~16 GB   | ~5 GB       | 15 GB  |
 | [llama3-3B-chat](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)  | 7 GB (fp16) | 100k  | 34.1 GB | ~42 GB   | ~5.3 GB     | 42 GB |
 | [llama3-8B-chat](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct)  | 16 GB (fp16) | 100k  | 52.4 GB | ~71 GB   | ~6.6 GB     | 69 GB  |
@@ -92,9 +93,8 @@ or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 ## Roadmap
 *For visibility of what's coming next (subject to change)*
-- gemma3-27B (or alternative) coming on Sep 30, Tue
-- Voxtral-small-24B ASR model coming on Oct 3, Fri
-- Qwen3-VL or alternative vision model by Oct 10, Fri
+- Voxtral-small-24B ASR model coming on Oct 5, Sun
+- Qwen3-VL or alternative vision model by Oct 12, Sun
 - Qwen3-Next MultiTokenPrediction in R&D
 - Efficient weight loading in R&D
 

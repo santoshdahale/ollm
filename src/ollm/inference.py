@@ -1,14 +1,15 @@
 import os, requests, zipfile
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoProcessor
 from .utils import Stats, file_get_contents
-from .gds_loader import GDSWeights, MoEWeightsLoader2
+from .gds_loader import GDSWeights, MoEWeightsLoader2, Gemma3Loader
 from .kvcache import KVCache
 
 class Inference:
-	def __init__(self, model_id, device="cuda:0", logging=True):
+	def __init__(self, model_id, device="cuda:0", logging=True, multimodality=False):
 		self.model_id = model_id
 		self.device = torch.device(device)
+		self.multimodality = multimodality
 		self.stats = Stats() if logging else None
 
 	def download_and_unpack(self, models_dir: str):
@@ -45,7 +46,7 @@ class Inference:
 	
 	def hf_download(self, model_dir):
 		from huggingface_hub import snapshot_download
-		urls = {"qwen3-next-80B": "Qwen/Qwen3-Next-80B-A3B-Instruct"}
+		urls = {"qwen3-next-80B": "Qwen/Qwen3-Next-80B-A3B-Instruct", "gemma3-12B":"google/gemma-3-12b-it"}
 		url = urls[self.model_id]
 		print(f"Downloading {url} ...")
 		snapshot_download(
@@ -56,13 +57,13 @@ class Inference:
 
 	
 	def ini_model(self, models_dir="./models/", force_download=False):
-		models_list = ["llama3-1B-chat", "llama3-3B-chat", "llama3-8B-chat", "gpt-oss-20B", "qwen3-next-80B"]
+		models_list = ["llama3-1B-chat", "llama3-3B-chat", "llama3-8B-chat", "gpt-oss-20B", "qwen3-next-80B", "gemma3-12B"]
 		if self.model_id not in models_list:
 			raise ValueError("Incorrect model id. It must be one of", models_list)
 		
 		model_dir = os.path.join(models_dir, self.model_id)
 		if os.path.exists(model_dir)==False or force_download==True:
-			if self.model_id=="qwen3-next-80B": 
+			if self.model_id in ["qwen3-next-80B", "gemma3-12B"]:
 				self.hf_download(model_dir)
 			else:
 				self.download_and_unpack(models_dir)
@@ -73,6 +74,13 @@ class Inference:
 			qwen3_next.loader = MoEWeightsLoader2(model_dir)
 			qwen3_next.stats = self.stats
 			self.model = qwen3_next.MyQwen3NextForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+		elif self.model_id=="gemma3-12B":
+			from . import gemma3
+			gemma3.loader = Gemma3Loader(model_dir)
+			gemma3.stats = self.stats
+			automodel = gemma3.MyGemma3ForConditionalGeneration if self.multimodality else gemma3.MyGemma3ForCausalLM
+			self.model = automodel.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+			self.processor = AutoProcessor.from_pretrained(model_dir)
 		elif self.model_id=="gpt-oss-20B":
 			from . import gpt_oss
 			gpt_oss.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
