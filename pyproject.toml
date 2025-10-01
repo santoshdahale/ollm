@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ollm"
-version = "0.4.2"
+version = "0.5.0"
 description = "LLM Inference for Large-Context Offline Workloads"
 authors = [
   { name="Anuar Sharafudinov", email="anuarsh@ailabs.us" }
@@ -17,7 +17,8 @@ dependencies = [
     "torch>2.6.0", #tested: 2.8.0
     "transformers>=4.55.0", #tested: 4.55.4, 4.56.1
     "accelerate",
-    "flash-attn" #tested: 2.7.4.post1
+    "flash-attn", #tested: 2.7.4.post1
+    "flash-linear-attention"
 ]
 
 [project.urls]

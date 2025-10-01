@@ -45,9 +45,9 @@ def inference_image():
 
 
 def inference_chat():
-	sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
+	#sm, um, max_new_tokens = "You are helpful AI assistant", "List planets starting from Mercury", 100
 	#sm, um, max_new_tokens = "[CHATS]:\n"+file_get_contents("./temp/chats.txt")+"[/END CHATS]", "Analyze chats above and write top 10 most popular questions (translate to English).", 500
-	#sm, um, max_new_tokens = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
+	sm, um, max_new_tokens = file_get_contents("./samples/45k_sample.txt"), "Analyze papers above and find 3 common similarities.", 500
 	messages = [{"role":"system", "content":sm}, {"role":"user", "content":um}]
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
@@ -71,7 +71,7 @@ if __name__=="__main__":
 	model = CausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True, attn_implementation="flash_attention_2")
 	#model.clean_layers_weights()
 	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
-	#model.offload_layers_to_cpu(layers_num=6)
+	#model.offload_layers_to_cpu(layers_num=12)
 	model.eval()
 	model.to(device)
 	inference_chat() #_image
