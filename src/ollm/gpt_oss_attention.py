@@ -4,6 +4,11 @@ This is an expanded version of the Flash Attention v2 implementation (see https:
 which can be found at https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html.
 
 This version has been extended to support banded attention and learned attention sinks.
+
+OPTIMIZATION NOTE: This module contains highly optimized Triton kernels for GPT-OSS flash attention.
+The kernels are left unchanged to maintain maximum performance. The enhanced optimization system
+in gpt_oss.py provides additional memory management and routing capabilities that complement
+these optimized kernels.
 """
 
 #import pytest

@@ -11,7 +11,20 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
-<p dir="auto"><em>Latest updates (0.5.0)</em> 🔥</p>
+<p dir="auto"><em>Latest updates (0.6.0)</em> 🔥</p>
+<ul dir="auto">
+<li><b>🚀 Advanced Optimization Suite</b> - 9 comprehensive optimization modules for memory, speed, and long-context efficiency</li>
+<li><b>📊 Optimization Profiles</b> - Pre-configured settings for memory-optimized, speed-optimized, balanced, and production scenarios</li>
+<li><b>🧠 Intelligent Memory Management</b> - GPU memory pooling, KV cache compression (quantization/pruning/clustering)</li>
+<li><b>⚡ Advanced Attention</b> - Sliding window, sparse, multi-scale, and adaptive attention mechanisms</li>
+<li><b>🎯 Speculative Decoding</b> - Parallel token generation with draft model verification for faster inference</li>
+<li><b>💾 Smart Prefetching</b> - Asynchronous layer loading and memory-aware prefetching</li>
+<li><b>📈 Dynamic Batching</b> - Intelligent request batching with length-based bucketing</li>
+<li><b>🌊 Streaming Inference</b> - Process infinite-length sequences with bounded memory</li>
+<li><b>📱 Auto-Adaptation</b> - Automatic performance monitoring and optimization strategy adjustment</li>
+</ul>
+
+<p dir="auto"><em>Previous updates (0.5.0)</em></p>
 <ul dir="auto">
 <li>Multimodal <b>gemma3-12B</b> (image+text) added. <a href="https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py">[sample with image]</a> </li>
 <li>.safetensor files are now read without `mmap` so they no longer consume RAM through page cache</li>
@@ -37,11 +50,22 @@ oLLM is a lightweight Python library for large-context LLM inference, built on t
 
 How do we achieve this:
 
+**Core Techniques:**
 - Loading layer weights from SSD directly to GPU one by one
 - Offloading KV cache to SSD and loading back directly to GPU, no quantization or PagedAttention
 - Offloading layer weights to CPU if needed
 - FlashAttention-2 with online softmax. Full attention matrix is never materialized. 
-- Chunked MLP. Intermediate upper projection layers may get large, so we chunk MLP as well 
+- Chunked MLP. Intermediate upper projection layers may get large, so we chunk MLP as well
+
+**Advanced Optimizations (New in 0.6.0):**
+- **GPU Memory Pool**: Reduces fragmentation with pre-allocated memory blocks and LRU caching
+- **KV Cache Compression**: 4-8bit quantization, importance-based pruning, clustering compression
+- **Advanced Attention**: Sliding window (O(n) complexity), sparse patterns, multi-scale hierarchical
+- **Speculative Decoding**: Draft model verification for 2-4x speedup on generation tasks
+- **Smart Prefetching**: Adaptive layer loading with memory pressure awareness
+- **Context Compression**: Hierarchical compression for 100k+ token sequences
+- **Dynamic Batching**: Length-based bucketing and adaptive batch sizing
+- **Streaming Processing**: Infinite sequence handling with bounded memory usage 
 ---
 Typical use cases include:
 - Analyze contracts, regulations, and compliance reports in one pass
@@ -71,11 +95,11 @@ pip install kvikio-cu{cuda_version} Ex, kvikio-cu12
 > **qwen3-next** requires 4.57.0.dev version of transformers to be installed as `pip install git+https://github.com/huggingface/transformers.git`
 
 
-## Example
+## Examples
 
-Code snippet sample 
+### Basic Usage
 
-```bash
+```python
 from ollm import Inference, file_get_contents, TextStreamer
 o = Inference("llama3-1B-chat", device="cuda:0", logging=True) #llama3-1B/3B/8B-chat, gpt-oss-20B, qwen3-next-80B
 o.ini_model(models_dir="./models/", force_download=False)
@@ -89,10 +113,91 @@ outputs = o.model.generate(input_ids=input_ids,  past_key_values=past_key_values
 answer = o.tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
 print(answer)
 ```
-or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python example.py` 
 
-**More samples**
-- [gemma3-12B image+text ](https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py)
+### Optimized Inference (New!)
+
+```python
+from ollm import Inference
+from ollm.optimization_profiles import get_profile, auto_select_profile
+
+# Auto-select best profile for your system
+profile_name = auto_select_profile()  # Returns "memory_optimized", "balanced", or "speed_optimized"
+config = get_profile(profile_name)
+
+# Initialize with optimizations
+inference = Inference("llama3-8B-chat", device="cuda:0", enable_optimizations=True)
+inference.ini_model(models_dir="./models/")
+
+# Generate with optimizations
+result = inference.generate_optimized(
+    input_text="Explain quantum computing in detail",
+    max_new_tokens=300,
+    optimization_config=config
+)
+
+print(f"Generated with {profile_name} profile: {result}")
+
+# Check optimization stats
+stats = inference.get_optimization_stats()
+print(f"Memory usage: {stats['memory']['current_memory_gb']:.1f}GB")
+print(f"KV cache compression: {stats.get('kv_compression_ratio', 1.0):.2f}")
+```
+
+### Production Deployment
+
+```python
+import asyncio
+from ollm import Inference
+from ollm.optimizations import DynamicBatcher
+from ollm.optimization_profiles import get_profile
+
+# Production setup with monitoring
+config = get_profile("production")
+inference = Inference("llama3-8B-chat", enable_optimizations=True)
+inference.setup_optimizations(config)
+
+# Dynamic batching for concurrent requests
+batcher = DynamicBatcher(
+    model=inference.model,
+    tokenizer=inference.tokenizer,
+    max_batch_size=8
+)
+
+async def process_request(request_id, prompt):
+    def callback(req_id, result):
+        print(f"Request {req_id}: {result[:50]}...")
+    
+    batcher.add_request(request_id, prompt, callback=callback, max_new_tokens=200)
+
+# Process multiple requests concurrently
+await asyncio.gather(*[
+    process_request("req_1", "What is machine learning?"),
+    process_request("req_2", "Explain neural networks"),
+    process_request("req_3", "How does backpropagation work?")
+])
+```
+
+Run basic example: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python example.py`
+
+**Additional Examples:**
+- [gemma3-12B image+text](https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py)
+- [Optimization profiles usage](https://github.com/Mega4alik/ollm/blob/main/profile_examples.py) 
+- [Production deployment demo](https://github.com/Mega4alik/ollm/blob/main/optimization_demo.py)
+
+### Quick Setup
+
+For optimized inference setup:
+```bash
+# Run optimization setup
+chmod +x setup_optimizations.sh
+./setup_optimizations.sh
+
+# Run optimization demo
+python optimization_demo.py
+
+# Test optimizations
+python test_optimizations.py
+```
 
 ## Roadmap
 *For visibility of what's coming next (subject to change)*

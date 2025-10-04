@@ -12,17 +12,109 @@ from .utils import _walk_to_parent, _assign_tensor_to_module, _set_meta_placehol
 from .gds_loader import GDSWeights
 from .gpt_oss_attention import attention as flash_attention
 
+# Enhanced optimizations
+try:
+	from .optimizations import (
+		EnhancedGPUMemoryPool, AttentionRouter, ContentAwareAttentionRouter,
+		UltraAdvancedKVCache, MixedPrecisionKVCache
+	)
+	OPTIMIZATIONS_AVAILABLE = True
+except ImportError:
+	OPTIMIZATIONS_AVAILABLE = False
+
 #global vars
 loader, stats = None, None
+optimization_router = None
+enhanced_memory_pool = None
 
 #======== rewriting core classess ==============
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssExperts,  GptOssModel, GptOssConfig, GptOssDecoderLayer, create_causal_mask, create_sliding_window_causal_mask, repeat_kv, MoeModelOutputWithPast
 
 class MyGptOssAttention(GptOssAttention):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.optimization_enabled = False
+		self.attention_router = None
+		self.kv_cache = None
+	
+	def enable_optimizations(self, router=None, kv_cache=None):
+		"""Enable enhanced optimizations for this attention layer"""
+		if OPTIMIZATIONS_AVAILABLE:
+			self.optimization_enabled = True
+			self.attention_router = router
+			self.kv_cache = kv_cache
+			print(f"GPT-OSS Layer {getattr(self, 'layer_idx', 'unknown')}: Enhanced optimizations enabled")
+	
 	def forward(self, *args, **kwargs):
-		out = super().forward(*args, **kwargs)
-		#print(self.layer_idx, "attention:", out[0].shape)
-		return out
+		if self.optimization_enabled and self.attention_router:
+			return self._forward_optimized(*args, **kwargs)
+		else:
+			out = super().forward(*args, **kwargs)
+			#print(self.layer_idx, "attention:", out[0].shape)
+			return out
+	
+	def _forward_optimized(self, hidden_states, attention_mask=None, position_ids=None, 
+						  past_key_values=None, output_attentions=False, use_cache=False, **kwargs):
+		"""Forward pass with enhanced optimizations"""
+		
+		# Extract query, key, value
+		bsz, q_len, _ = hidden_states.size()
+		
+		# Standard QKV projection (keep existing GPT-OSS logic)
+		query_states = self.q_proj(hidden_states)
+		key_states = self.k_proj(hidden_states)
+		value_states = self.v_proj(hidden_states)
+		
+		# Reshape for multi-head attention
+		query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+		key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+		value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+		
+		# Use enhanced KV cache if available
+		if self.kv_cache and past_key_values is not None:
+			key_states, value_states = self.kv_cache.update(
+				key_states, value_states, self.layer_idx
+			)
+		
+		# Determine content context for routing
+		content_context = {
+			"content_type": self._analyze_gpt_oss_content(hidden_states),
+			"model_type": "gpt_oss",
+			"layer_idx": getattr(self, 'layer_idx', 0)
+		}
+		
+		# Route attention through enhanced system
+		attn_output = self.attention_router.route_attention(
+			query_states, key_states, value_states,
+			attention_mask=attention_mask,
+			position_ids=position_ids,
+			context=content_context
+		)
+		
+		# Reshape back
+		attn_output = attn_output.transpose(1, 2).contiguous()
+		attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+		
+		# Output projection
+		attn_output = self.o_proj(attn_output)
+		
+		if output_attentions:
+			return attn_output, None  # Attention weights not available in optimized path
+		else:
+			return (attn_output,)
+	
+	def _analyze_gpt_oss_content(self, hidden_states):
+		"""Analyze content type for GPT-OSS specific routing"""
+		# GPT-OSS is typically used for code/structured content
+		# Analyze hidden states to determine content characteristics
+		sparsity = (hidden_states.abs() < 0.01).float().mean().item()
+		
+		if sparsity > 0.7:
+			return "code"  # High sparsity suggests code
+		elif sparsity > 0.4:
+			return "structured"  # Medium sparsity suggests structured data
+		else:
+			return "natural_language"  # Low sparsity suggests natural language
 
 
 class MyGptOssExperts(GptOssExperts):
@@ -264,6 +356,77 @@ class MyGptOssForCausalLM(GptOssForCausalLM):
 		super().__init__(config)
 		self.model.parent_lm_head = self.lm_head #link
 		self.num_hidden_layers = config.num_hidden_layers
+		
+		# Enhanced optimization components
+		self.optimizations_enabled = False
+		self.attention_router = None
+		self.enhanced_kv_cache = None
+		self.memory_pool = None
+	
+	def enable_gpt_oss_optimizations(self, config=None):
+		"""Enable GPT-OSS specific optimizations"""
+		if not OPTIMIZATIONS_AVAILABLE:
+			print("Warning: Enhanced optimizations not available for GPT-OSS")
+			return
+		
+		config = config or {}
+		
+		# Initialize enhanced memory pool for GPT-OSS
+		self.memory_pool = EnhancedGPUMemoryPool(
+			auto_tune=True,
+			fragmentation_threshold=0.3
+		)
+		
+		# Initialize content-aware attention router (GPT-OSS optimized)
+		self.attention_router = ContentAwareAttentionRouter()
+		
+		# Initialize mixed precision KV cache (good for GPT-OSS)
+		compression_strategy = config.get('compression_strategy', 'mixed_precision')
+		if compression_strategy == 'ultra_advanced':
+			self.enhanced_kv_cache = UltraAdvancedKVCache(
+				compression_strategy='adaptive',
+				quality_threshold=0.95
+			)
+		else:
+			self.enhanced_kv_cache = MixedPrecisionKVCache(
+				key_bits=4, value_bits=8,
+				temporal_decay=True,
+				pattern_compression=True
+			)
+		
+		# Enable optimizations on attention layers
+		# Note: GPT-OSS has unique architecture, so we handle it carefully
+		for layer in self.model.layers:
+			if hasattr(layer, 'self_attn'):
+				if hasattr(layer.self_attn, 'enable_optimizations'):
+					layer.self_attn.enable_optimizations(
+						router=self.attention_router,
+						kv_cache=self.enhanced_kv_cache
+					)
+		
+		self.optimizations_enabled = True
+		print(f"GPT-OSS enhanced optimizations enabled for {len(self.model.layers)} layers")
+	
+	def get_gpt_oss_optimization_stats(self):
+		"""Get GPT-OSS specific optimization statistics"""
+		if not self.optimizations_enabled:
+			return {"optimizations_enabled": False}
+		
+		stats = {"optimizations_enabled": True, "model_type": "gpt_oss"}
+		
+		if self.memory_pool:
+			stats["memory_pool"] = self.memory_pool.get_enhanced_stats()
+		
+		if self.attention_router:
+			stats["attention_routing"] = self.attention_router.get_routing_stats()
+		
+		if self.enhanced_kv_cache:
+			if hasattr(self.enhanced_kv_cache, 'get_ultra_stats'):
+				stats["kv_cache"] = self.enhanced_kv_cache.get_ultra_stats()
+			elif hasattr(self.enhanced_kv_cache, 'get_compression_stats'):
+				stats["kv_cache"] = self.enhanced_kv_cache.get_compression_stats()
+		
+		return stats
 
 	def generate(self, **args):
 		with torch.no_grad():
