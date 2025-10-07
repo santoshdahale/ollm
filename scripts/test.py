@@ -31,7 +31,7 @@ def inference_chat():
 	input_ids = tokenizer.apply_chat_template(messages, tokenize=True, reasoning_effort="minimal", add_generation_prompt=True, return_tensors="pt", return_dict=False).to(device)
 	text_streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
 	with torch.no_grad():
-		past_key_values = KVCache(cache_dir="/media/mega4alik/ssd/kv_cache/", stats=o.stats) #DynamicCache(offloading=True)
+		past_key_values = None #KVCache(cache_dir="/media/mega4alik/ssd/kv_cache/", stats=o.stats) #DynamicCache(offloading=True)
 		#past_key_values = qwen3_next.Qwen3NextDiskCache(model.config, cache_dir="/media/mega4alik/ssd/kv_cache/", stats=stats) #KVCache #DynamicCache(offloading=True)
 		print("\n\nGenerate started.", datetime.now().strftime("%H:%M:%S"), "input_ids.shape:", input_ids.shape)
 		outputs = model.generate(input_ids=input_ids, max_new_tokens=max_new_tokens, do_sample=False, past_key_values=past_key_values, use_cache=True, streamer=text_streamer).detach().cpu()
@@ -54,21 +54,20 @@ def inference_audio():
 		}
 	]
 	inputs = processor.apply_chat_template(messages, return_tensors="pt").to(device)
-	text_streamer = None #TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=False)
+	text_streamer = TextStreamer(processor.tokenizer, skip_prompt=True, skip_special_tokens=False)
 	with torch.inference_mode():
 		print("\n\nAudio Generate started.", datetime.now().strftime("%H:%M:%S"))
-		outputs = model.generate(**inputs, max_new_tokens=100, do_sample=False, past_key_values=None, use_cache=True, streamer=text_streamer).detach().cpu()
-		answer = tokenizer.decode(outputs[0][input_ids.shape[-1]:], skip_special_tokens=False)
+		outputs = model.generate(**inputs, max_new_tokens=10, do_sample=False, past_key_values=None, use_cache=True, streamer=text_streamer).detach().cpu()
+		answer = processor.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=False)
 		print(answer)
 
 #=======================================================
 if __name__=="__main__":
 	device = torch.device("cuda:0")
 	model_id = "voxtral-small-24B" #"gemma3-12B" #"qwen3-next-80B" #
-	model_dir = "/home/mega4alik/Desktop/models/voxtral-small-24B"  #f"/media/mega4alik/ssd{"2" if model_id=="qwen3-next-80B" else ""}/models/{model_id}/"
+	model_dir = f"/media/mega4alik/ssd2/models/{model_id}/"	
 	print("loading", model_dir)
-	o, CausalLM = ini_model(model_id)
-	#tokenizer = AutoTokenizer.from_pretrained(model_dir)
+	o, CausalLM = ini_model(model_id)		
 	model = CausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True, attn_implementation="flash_attention_2")
 	#model.clean_layers_weights()
 	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
