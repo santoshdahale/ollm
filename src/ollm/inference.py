@@ -117,20 +117,21 @@ class Inference:
 				except Exception as e:
 					print(f"Warning: Could not enable GPT-OSS optimizations: {e}")
 
-    else:
+		else:
 			from . import llama
 			llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 			llama.stats = self.stats			
 			self.model = llama.MyLlamaForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float16, device_map="cpu", attn_implementation="flash_attention_2", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
 			self.model.clean_layers_weights()
 
-		self.model.eval()
-		self.model.to(self.device)
-    if not hasattr(self, "tokenizer"): self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
-		
-		# Setup optimizations after model is loaded
-		if self.enable_optimizations:
-			self.setup_optimizations()
+			self.model.eval()
+			self.model.to(self.device)
+
+		if not hasattr(self, "tokenizer"): self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+			
+			# Setup optimizations after model is loaded
+			if self.enable_optimizations:
+				self.setup_optimizations()
 
 	
 	def offload_layers_to_cpu(self, **args):
