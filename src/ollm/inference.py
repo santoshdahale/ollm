@@ -102,7 +102,7 @@ class Inference:
 
 		self.model.eval()
 		self.model.to(self.device)
-		if not self.tokenizer: self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+		if not hasattr(self, "tokenizer"): self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
 
 	
 	def offload_layers_to_cpu(self, **args):

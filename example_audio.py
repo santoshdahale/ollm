@@ -1,4 +1,8 @@
-# voxtral-small-24B ASR+Text example
+# voxtral-small-24B (mistralai/Voxtral-Small-24B-2507) ASR+Text example
+
+# Make sure to INSTALL additional dependencies first!
+#  pip install --upgrade "mistral-common[audio]"
+#  pip install librosa
 
 from ollm import Inference, file_get_contents, TextStreamer
 o = Inference("voxtral-small-24B", device="cuda:0", logging=True, multimodality=True)
