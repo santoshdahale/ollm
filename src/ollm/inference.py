@@ -1,16 +1,30 @@
-import os, requests, zipfile
+import os
+import requests
+import zipfile
 import torch
 from transformers import AutoTokenizer, AutoProcessor
 from .utils import Stats, file_get_contents
 from .gds_loader import GDSWeights, MoEWeightsLoader2, Gemma3Loader
 from .kvcache import KVCache
+from .optimizations import (
+    GPUMemoryPool, MemoryManager,
+    CompressedKVCache, AdaptiveOptimizer,
+    LayerPrefetcher, SpeculativeDecoder,
+    StreamingInference, DynamicBatcher,
+    AttentionOptimizer
+)
 
 class Inference:
-	def __init__(self, model_id, device="cuda:0", logging=True, multimodality=False):
+	def __init__(self, model_id, device="cuda:0", logging=True, multimodality=False, enable_optimizations=True):
 		self.model_id = model_id
 		self.device = torch.device(device)
 		self.multimodality = multimodality
 		self.stats = Stats() if logging else None
+		self.enable_optimizations = enable_optimizations
+		
+		# Initialize optimization components
+		if enable_optimizations:
+			self._init_optimizations()
 
 	def download_and_unpack(self, models_dir: str):
 		os.makedirs(models_dir, exist_ok=True)
@@ -92,8 +106,18 @@ class Inference:
 			from . import gpt_oss
 			gpt_oss.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 			gpt_oss.stats = self.stats
-			self.model = gpt_oss.MyGptOssForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)		
-		else:
+			self.model = gpt_oss.MyGptOssForCausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True)
+			
+			# Enable GPT-OSS specific optimizations if requested
+			if self.enable_optimizations:
+				try:
+					if hasattr(self.model, 'enable_gpt_oss_optimizations'):
+						self.model.enable_gpt_oss_optimizations()
+						print("GPT-OSS enhanced optimizations enabled")
+				except Exception as e:
+					print(f"Warning: Could not enable GPT-OSS optimizations: {e}")
+
+    else:
 			from . import llama
 			llama.loader = GDSWeights(os.path.join(model_dir, "gds_export"))
 			llama.stats = self.stats			
@@ -102,7 +126,11 @@ class Inference:
 
 		self.model.eval()
 		self.model.to(self.device)
-		if not hasattr(self, "tokenizer"): self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    if not hasattr(self, "tokenizer"): self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
+		
+		# Setup optimizations after model is loaded
+		if self.enable_optimizations:
+			self.setup_optimizations()
 
 	
 	def offload_layers_to_cpu(self, **args):
@@ -111,6 +139,55 @@ class Inference:
 	def offload_layers_to_gpu_cpu(self, **args):
 		self.model.offload_layers_to_gpu_cpu(**args)
 	
+	def _init_optimizations(self):
+		"""Initialize optimization components"""
+		self.memory_manager = MemoryManager(device=str(self.device))
+		self.adaptive_optimizer = None  # Will be initialized after model loading
+		self.prefetcher = None
+		self.speculative_decoder = None
+		self.streaming_processor = None
+		self.batcher = None
+		self.compressed_cache = None
+	
+	def setup_optimizations(self, config=None):
+		"""Setup optimizations after model is loaded"""
+		if not self.enable_optimizations or not hasattr(self, 'model'):
+			return
+		
+		config = config or {}
+		
+		# Initialize adaptive optimizer
+		self.adaptive_optimizer = AdaptiveOptimizer(
+			model=self.model,
+			device=str(self.device)
+		)
+		
+		# Initialize layer prefetcher
+		self.prefetcher = LayerPrefetcher(
+			model=self.model,
+			prefetch_distance=config.get('prefetch_distance', 2),
+			device=str(self.device)
+		)
+		
+		# Initialize compressed KV cache
+		self.compressed_cache = CompressedKVCache(
+			compression_method=config.get('kv_compression', 'quantization'),
+			bits=config.get('compression_bits', 8)
+		)
+		
+		# Initialize streaming processor
+		self.streaming_processor = StreamingInference(
+			model=self.model,
+			tokenizer=self.tokenizer
+		)
+		
+		# Initialize dynamic batcher
+		self.batcher = DynamicBatcher(
+			model=self.model,
+			tokenizer=self.tokenizer,
+			max_batch_size=config.get('max_batch_size', 8)
+		)
+
 	def DiskCache(self, cache_dir="./kvcache"):
 		if self.model_id in ["gpt-oss-20B"]:
 			print(f"{self.model_id} DiskCache is not supported at the moment. Using default DynamicCache instead")
@@ -120,3 +197,137 @@ class Inference:
 			return Qwen3NextDiskCache(self.model.config, cache_dir=cache_dir, stats=self.stats)
 		else:
 			return KVCache(cache_dir=cache_dir, stats=self.stats) #config=?
+	
+	def generate_optimized(self, input_text, max_new_tokens=100, **kwargs):
+		"""Generate text with all optimizations enabled"""
+		if not self.enable_optimizations:
+			return self._generate_standard(input_text, max_new_tokens, **kwargs)
+		
+		# Setup optimizations if not done yet
+		if self.adaptive_optimizer is None:
+			self.setup_optimizations(kwargs.get('optimization_config', {}))
+		
+		# Tokenize input
+		input_ids = self.tokenizer.encode(input_text, add_special_tokens=True, return_tensors="pt")
+		input_ids = input_ids.to(self.device)
+		seq_len = input_ids.shape[1]
+		
+		# Determine optimal strategy
+		strategy = kwargs.get('strategy', 'auto')
+		if strategy == 'auto':
+			strategy = self._choose_generation_strategy(seq_len, **kwargs)
+		
+		if strategy == 'speculative' and self.speculative_decoder:
+			return self._generate_speculative(input_ids, max_new_tokens, **kwargs)
+		elif strategy == 'streaming':
+			return self._generate_streaming(input_text, max_new_tokens, **kwargs)
+		else:
+			return self._generate_with_optimizations(input_ids, max_new_tokens, **kwargs)
+	
+	def _choose_generation_strategy(self, seq_len, **kwargs):
+		"""Choose optimal generation strategy based on sequence characteristics"""
+		if seq_len > 8192:
+			return 'streaming'
+		elif seq_len < 2048 and self.speculative_decoder:
+			return 'speculative' 
+		else:
+			return 'optimized'
+	
+	def _generate_standard(self, input_text, max_new_tokens, **kwargs):
+		"""Standard generation without optimizations"""
+		input_ids = self.tokenizer.encode(input_text, add_special_tokens=True, return_tensors="pt")
+		input_ids = input_ids.to(self.device)
+		
+		with torch.no_grad():
+			outputs = self.model.generate(
+				input_ids=input_ids,
+				max_new_tokens=max_new_tokens,
+				do_sample=kwargs.get('do_sample', True),
+				temperature=kwargs.get('temperature', 0.7),
+				pad_token_id=self.tokenizer.eos_token_id
+			)
+		
+		generated_text = self.tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True)
+		return generated_text
+	
+	def _generate_with_optimizations(self, input_ids, max_new_tokens, **kwargs):
+		"""Generate with memory and attention optimizations"""
+		with torch.no_grad():
+			outputs = self.model.generate(
+				input_ids=input_ids,
+				max_new_tokens=max_new_tokens,
+				past_key_values=self.compressed_cache,
+				do_sample=kwargs.get('do_sample', True),
+				temperature=kwargs.get('temperature', 0.7),
+				pad_token_id=self.tokenizer.eos_token_id
+			)
+		
+		generated_text = self.tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True)
+		return generated_text
+	
+	def _generate_speculative(self, input_ids, max_new_tokens, **kwargs):
+		"""Generate using speculative decoding"""
+		result = self.speculative_decoder.generate(
+			input_ids=input_ids,
+			max_new_tokens=max_new_tokens,
+			temperature=kwargs.get('temperature', 0.7)
+		)
+		
+		generated_text = self.tokenizer.decode(
+			result['sequences'][0][input_ids.shape[1]:], 
+			skip_special_tokens=True
+		)
+		return generated_text
+	
+	def _generate_streaming(self, input_text, max_new_tokens, **kwargs):
+		"""Generate using streaming for very long inputs"""
+		# For very long inputs, use chunked processing
+		processor = self.streaming_processor
+		result = processor.process_long_sequence(
+			input_text=input_text,
+			max_new_tokens=max_new_tokens
+		)
+		return result
+	
+	def get_optimization_stats(self):
+		"""Get comprehensive optimization statistics"""
+		if not self.enable_optimizations:
+			return {"optimizations_enabled": False}
+		
+		stats = {"optimizations_enabled": True, "model_id": self.model_id}
+		
+		if self.memory_manager:
+			stats["memory"] = self.memory_manager.get_memory_report()
+		
+		if self.adaptive_optimizer:
+			stats["optimizer"] = self.adaptive_optimizer.get_performance_report()
+		
+		if self.prefetcher:
+			stats["prefetcher"] = self.prefetcher.get_stats()
+		
+		if self.compressed_cache:
+			stats["kv_cache"] = {
+				"compression_method": self.compressed_cache.compression_method,
+				"compressed_layers": len(self.compressed_cache.compressed_keys)
+			}
+		
+		if self.batcher:
+			stats["batcher"] = self.batcher.get_stats()
+		
+		# Model-specific optimization stats
+		if self.model_id == "gpt-oss-20B" and hasattr(self.model, 'get_gpt_oss_optimization_stats'):
+			try:
+				stats["gpt_oss_specific"] = self.model.get_gpt_oss_optimization_stats()
+			except Exception as e:
+				stats["gpt_oss_specific"] = {"error": str(e)}
+		
+		return stats
+	
+	def set_draft_model(self, draft_model):
+		"""Set draft model for speculative decoding"""
+		if self.enable_optimizations and hasattr(self, 'model'):
+			self.speculative_decoder = SpeculativeDecoder(
+				main_model=self.model,
+				draft_model=draft_model,
+				num_candidates=4
+			)

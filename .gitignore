@@ -9,3 +9,5 @@ dist/
 build/
 *.egg-info/
 src/ollm.egg-info
+venv
+.venv

@@ -1,21 +1,42 @@
 import json, os, time, math, re
 import torch
 from torch.utils.dlpack import from_dlpack
-import cupy as cp
-import kvikio
+try:
+    import cupy as cp
+    CUPY_AVAILABLE = True
+except ImportError:
+    CUPY_AVAILABLE = False
+    cp = None
+try:
+    import kvikio
+    KVIKIO_AVAILABLE = True
+except ImportError:
+    KVIKIO_AVAILABLE = False
+    kvikio = None
 #from safetensors.torch import safe_open, load_file
 import struct
 
 stats = None
 
-DTYPE_MAP = {
-	"float16": cp.float16,
-	"bfloat16": cp.float16, #cp.dtype('bfloat16'),
-	"float32": cp.float32,
-	"float64": cp.float64,
-	"int8": cp.int8,
-	"int32": cp.int32,
-}
+if CUPY_AVAILABLE:
+    DTYPE_MAP = {
+        "float16": cp.float16,
+        "bfloat16": cp.float16, #cp.dtype('bfloat16'),
+        "float32": cp.float32,
+        "float64": cp.float64,
+        "int8": cp.int8,
+        "int32": cp.int32,
+    }
+else:
+    # Fallback to torch dtypes when cupy unavailable
+    DTYPE_MAP = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+        "float64": torch.float64,
+        "int8": torch.int8,
+        "int32": torch.int32,
+    }
 
 class GDSWeights:
 	def __init__(self, path: str, device="cuda:0"):
@@ -40,27 +61,62 @@ class GDSWeights:
 			return self.load_from_disk_to_cuda(path, shape, dtype)
 
 	def load_from_disk_to_cuda(self, path, shape, dtype): #str, list, str
-		cp_dtype = DTYPE_MAP[dtype]
-		n_elems = 1
-		for s in shape:
-			n_elems *= s
-		nbytes = n_elems * cp.dtype(cp_dtype).itemsize
+		if CUPY_AVAILABLE and KVIKIO_AVAILABLE:
+			# GPU Direct I/O path
+			cp_dtype = DTYPE_MAP[dtype]
+			n_elems = 1
+			for s in shape:
+				n_elems *= s
+			nbytes = n_elems * cp.dtype(cp_dtype).itemsize
 
-		# Allocate on GPU
-		with cp.cuda.Device(0):
-			buf = cp.empty(n_elems, dtype=cp_dtype)
+			# Allocate on GPU
+			with cp.cuda.Device(0):
+				buf = cp.empty(n_elems, dtype=cp_dtype)
 
-		# DMA read directly into GPU buffer
-		with kvikio.CuFile(path, "r") as f:
-			# Read raw bytes straight into GPU memory
-			n = f.read(buf)
-			if n != nbytes:
-				raise IOError(f"Short read: {n} of {nbytes} bytes from {path}")
+			# DMA read directly into GPU buffer
+			with kvikio.CuFile(path, "r") as f:
+				# Read raw bytes straight into GPU memory
+				n = f.read(buf)
+				if n != nbytes:
+					raise IOError(f"Short read: {n} of {nbytes} bytes from {path}")
 
-		# Reshape and hand to torch via DLPack
-		buf = buf.reshape(shape)
-		t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
-		return t    
+			# Reshape and hand to torch via DLPack
+			buf = buf.reshape(shape)
+			t = from_dlpack(buf.toDlpack())  # torch.cuda.Tensor shares memory
+			return t
+		else:
+			# Fallback to regular file loading
+			torch_dtype = DTYPE_MAP[dtype]
+			n_elems = 1
+			for s in shape:
+				n_elems *= s
+			
+			# Map torch dtype to numpy
+			if torch_dtype == torch.float16:
+				np_dtype = np.float16
+			elif torch_dtype == torch.bfloat16:
+				np_dtype = np.float16  # Fallback since numpy doesn't have bfloat16
+			elif torch_dtype == torch.float32:
+				np_dtype = np.float32
+			elif torch_dtype == torch.int8:
+				np_dtype = np.int8
+			elif torch_dtype == torch.int32:
+				np_dtype = np.int32
+			else:
+				np_dtype = np.float32
+			
+			nbytes = n_elems * np_dtype().itemsize
+			
+			# Read file into CPU memory first
+			with open(path, "rb") as f:
+				data = f.read(nbytes)
+				if len(data) != nbytes:
+					raise IOError(f"Short read: {len(data)} of {nbytes} bytes from {path}")
+			
+			# Convert to tensor and move to GPU
+			np_array = np.frombuffer(data, dtype=np_dtype)
+			tensor = torch.from_numpy(np_array).reshape(shape)
+			return tensor.to(self.device)    
 
 	def has(self, name: str) -> bool:
 		return name in self.manifest
@@ -271,8 +327,11 @@ class SafeTensorReaderGPU:
 			self.header = json.loads(f.read(header_len))
 			self.data_offset = 8 + header_len
 		
-		# Open with kvikio (GPU-aware file handle)
-		self._fp = kvikio.CuFile(path, "rb")
+		# Open with kvikio (GPU-aware file handle) if available
+		if KVIKIO_AVAILABLE:
+			self._fp = kvikio.CuFile(path, "rb")
+		else:
+			self._fp = open(path, "rb")
 
 
 	def __enter__(self):
@@ -296,19 +355,32 @@ class SafeTensorReaderGPU:
 		off0, off1 = info["data_offsets"]
 		nbytes = off1 - off0
 
-		# Allocate GPU buffer (CuPy)
-		buf = cp.empty((nbytes,), dtype=cp.uint8)
+		if CUPY_AVAILABLE and KVIKIO_AVAILABLE:
+			# GPU Direct path with CuPy
+			# Allocate GPU buffer (CuPy)
+			buf = cp.empty((nbytes,), dtype=cp.uint8)
 
-		# Asynchronous pread → returns IOFuture
-		future = self._fp.pread(buf, file_offset=self.data_offset + off0)
+			# Asynchronous pread → returns IOFuture
+			future = self._fp.pread(buf, file_offset=self.data_offset + off0)
 
-		# Block until done
-		nread = future.get()
-		if nread != nbytes: raise IOError(f"Expected {nbytes} bytes, got {nread}")
-		# Convert byte buffer → torch tensor
-		torch_tensor = torch.as_tensor(buf, device=self.device).view(torch.uint8)
-		torch_tensor = torch_tensor.view(dtype).reshape(shape)
-		return torch_tensor
+			# Block until done
+			nread = future.get()
+			if nread != nbytes: raise IOError(f"Expected {nbytes} bytes, got {nread}")
+			# Convert byte buffer → torch tensor
+			torch_tensor = torch.as_tensor(buf, device=self.device).view(torch.uint8)
+			torch_tensor = torch_tensor.view(dtype).reshape(shape)
+			return torch_tensor
+		else:
+			# Fallback to regular file reading
+			self._fp.seek(self.data_offset + off0)
+			data = self._fp.read(nbytes)
+			if len(data) != nbytes: 
+				raise IOError(f"Expected {nbytes} bytes, got {len(data)}")
+			
+			# Convert to torch tensor
+			torch_tensor = torch.frombuffer(data, dtype=torch.uint8)
+			torch_tensor = torch_tensor.view(dtype).reshape(shape)
+			return torch_tensor.to(self.device)
 
 
 
