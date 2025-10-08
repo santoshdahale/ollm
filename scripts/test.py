@@ -71,7 +71,7 @@ if __name__=="__main__":
 	model = CausalLM.from_pretrained(model_dir, torch_dtype=torch.bfloat16, device_map="cpu", low_cpu_mem_usage=True, ignore_mismatched_sizes=True, attn_implementation="flash_attention_2")
 	#model.clean_layers_weights()
 	#model.offload_layers_to_gpu_cpu(gpu_layers_num=48, cpu_layers_num=0)
-	#model.offload_layers_to_cpu(layers_num=12)
+	model.offload_layers_to_cpu(layers_num=1)
 	model.eval()
 	model.to(device)
 	inference_audio()
