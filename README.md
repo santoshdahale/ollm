@@ -1,3 +1,4 @@
+
 <!-- markdownlint-disable MD001 MD041 -->
 <p align="center">
   <picture>
@@ -11,10 +12,10 @@ LLM Inference for Large-Context Offline Workloads
 </h3>
 
 oLLM is a lightweight Python library for large-context LLM inference, built on top of Huggingface Transformers and PyTorch. It enables running models like [gpt-oss-20B](https://huggingface.co/openai/gpt-oss-20b), [qwen3-next-80B](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct) or [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) on 100k context using ~$200 consumer GPU with 8GB VRAM.  No quantization is used—only fp16/bf16 precision. 
-<p dir="auto"><em>Latest updates (0.5.0)</em> 🔥</p>
+<p dir="auto"><em>Latest updates (0.5.2)</em> 🔥</p>
 <ul dir="auto">
-<li>Multimodal <b>gemma3-12B</b> (image+text) added. <a href="https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py">[sample with image]</a> </li>
-<li>.safetensor files are now read without `mmap` so they no longer consume RAM through page cache</li>
+<li>Multimodal <b>voxtral-small-24B</b> (audio+text) added. <a href="https://github.com/Mega4alik/ollm/blob/main/example_audio.py">[sample with audio]</a> </li>
+<li>Multimodal <b>gemma3-12B</b> (image+text) added. <a href="https://github.com/Mega4alik/ollm/blob/main/example_image.py">[sample with image]</a> </li>
 <li>qwen3-next-80B DiskCache support added</li>
 <li><b>qwen3-next-80B</b> (160GB model) added with <span style="color:blue">⚡️1tok/2s</span> throughput (our fastest model so far)</li>
 <li>gpt-oss-20B flash-attention-like implementation added to reduce VRAM usage </li>
@@ -68,7 +69,7 @@ pip install -e .
 pip install kvikio-cu{cuda_version} Ex, kvikio-cu12
 ```
 > 💡 **Note**  
-> **qwen3-next** requires 4.57.0.dev version of transformers to be installed as `pip install git+https://github.com/huggingface/transformers.git`
+> **voxtral-small-24B** requires additional pip dependencies to be installed as `pip install "mistral-common[audio]"` and `pip install librosa`
 
 
 ## Example
@@ -92,15 +93,15 @@ print(answer)
 or run sample python script as `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python example.py` 
 
 **More samples**
-- [gemma3-12B image+text ](https://github.com/Mega4alik/ollm/blob/main/example_multimodality.py)
+- [gemma3-12B image+text](https://github.com/Mega4alik/ollm/blob/main/example_image.py)
+- [voxtral-small-24B audio+text](https://github.com/Mega4alik/ollm/blob/main/example_audio.py)
 
 ## Roadmap
 *For visibility of what's coming next (subject to change)*
-- Voxtral-small-24B ASR model coming on Oct 5, Sun
-- Qwen3-VL or alternative vision model by Oct 12, Sun
+- Qwen3-Next quantized version
+- Qwen3-VL or alternative vision model
 - Qwen3-Next MultiTokenPrediction in R&D
-- Efficient weight loading in R&D
 
 
 ## Contact us
-If there’s a model you’d like to see supported, feel free to reach out at anuarsh@ailabs.us—I’ll do my best to make it happen.
+If there’s a model you’d like to see supported, feel free to suggest it in the [discussion](https://github.com/Mega4alik/ollm/discussions/4) — I’ll do my best to make it happen.
