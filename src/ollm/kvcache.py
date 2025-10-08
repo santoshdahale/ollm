@@ -54,7 +54,7 @@ class KVCache(DynamicCache, oCache): #DiskCache
 		
 		out = super().update(key_states, value_states, layer_idx, cache_kwargs) #tuple of (self.key_cache[layer_idx], self.value_cache[layer_idx])		
 		if tensors is None: self.save_to_disk(out, layer_idx) #save only first time cause it's slow to save
-		self.layers[layer_idx].keys, self.layers[layer_idx].values = None, None
+		self.layers[layer_idx].keys, self.layers[layer_idx].values = torch.empty(0), torch.empty(0)
 		return out
 
 

@@ -83,17 +83,9 @@ class MyLlamaMLP(LlamaMLP):
 		return down_proj
 
 
-class MyLlamaDecoderLayer(LlamaDecoderLayer):
-	def __init__(self, config: LlamaConfig, layer_idx: int):
-		self.layer_idx = layer_idx
-		super().__init__(config, layer_idx)
 
-	def _layer_param_manifest_names(self) -> dict:
-		"""
-		Return a mapping of local attribute paths -> manifest names in your storage.
-		Adjust the keys/names for your model's param naming convention.
-		Example keys are relative to `self` (not full HF names).
-		"""
+class loaderLayer:
+	def _layer_param_manifest_names(self) -> dict:		
 		base = f"model.layers.{self.layer_idx}"
 		return {
 			"self_attn.q_proj.weight": f"{base}.self_attn.q_proj.weight",
@@ -106,7 +98,7 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 			"input_layernorm.weight":  f"{base}.input_layernorm.weight",
 			"post_attention_layernorm.weight": f"{base}.post_attention_layernorm.weight",
 			# add any biases or additional params you need
-		}    
+		}
 
 	def _load_layer_weights(self):
 		manifest_map = self._layer_param_manifest_names()
@@ -130,6 +122,12 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 			# replace with placeholder (keeps module graph intact)
 			_set_meta_placeholder(parent, leaf)
 
+
+class MyLlamaDecoderLayer(LlamaDecoderLayer, loaderLayer):
+	def __init__(self, config: LlamaConfig, layer_idx: int):
+		self.layer_idx = layer_idx
+		super().__init__(config, layer_idx)
+
 	def forward(self, *args, **kwargs):
 		self._load_layer_weights()
 		out = super().forward(*args, **kwargs)
@@ -137,9 +135,13 @@ class MyLlamaDecoderLayer(LlamaDecoderLayer):
 		return out
 
 
-
 class MyLlamaModel(LlamaModel):
-	#self.parent_lm_head is set
+	def __init__(self, config):
+		super().__init__(config)		
+		self.layers = nn.ModuleList()
+		for layer_idx in range(config.num_hidden_layers):
+			self.layers.append(MyLlamaDecoderLayer(config, layer_idx))
+			self.layers[-1]._unload_layer_weights()		
 
 	def forward(
 		self,

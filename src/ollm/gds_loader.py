@@ -299,7 +299,7 @@ class SafeTensorReader: #safetensors replacement because its mmap is killing the
 			self.header = json.loads(f.read(header_len))
 			self.data_offset = 8 + header_len
 		self._fp = open(path, "rb")
-		self.DTYPE_MAP = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16}
+		self.DTYPE_MAP = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16, "I32": torch.int32, "I64": torch.int64}
 	
 	def close(self):
 		self._fp.close()
